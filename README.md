@@ -107,19 +107,34 @@ npm run dev            # http://127.0.0.1:7799
 ```
 
 Paste your token, pick a project, type a repo path, hit **Scan repo for drift**.
+**Disconnect** hands the token back — it is held in memory only, and never written to disk.
 
 ## Status
 
 | | |
 |---|---|
-| Zerops REST client | done — verified against a live account |
+| Zerops REST client | done — verified against a live account, 23 tests |
 | Architecture graph | done — pure, 26 tests |
 | Repo scan + drift | done — pure, 24 tests |
+| HTTP API | done — 32 integration tests against a real server + database |
 | Provisioning | done — creates real services, verified and cleaned up |
 | Export `zerops.yaml` | done |
 | Persisted history | done — Postgres, survives restart |
 | Single-writer lock | done — guards provisioning, 20-way concurrency proven |
 | Deployed on Zerops | **not done** — needs a `zcli` login, see below |
+
+Every flow above was exercised in a browser against the real API, including the ones that
+fail: a rejected token, a project that no longer exists, a path that is not on this machine,
+a directory with no manifests, and a provision confirmed after the HA toggle was changed
+behind its back. Notes on what that found are in [AUDIT.md](AUDIT.md).
+
+```bash
+npm test          # 156 tests; the 64 integration ones skip if Postgres is not running
+npm run typecheck # src + test, and the UI has its own
+```
+
+Integration tests use their own `brain_test` database, created on demand — they never write to
+the log the app reads.
 
 ### The one thing genuinely blocked
 

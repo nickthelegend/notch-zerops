@@ -94,6 +94,16 @@ export async function record(e: NewEvent): Promise<RecordResult> {
 export interface ReadOpts {
   /** Restrict to one project. Omit for everything, including account-level events. */
   scope?: string;
+  /**
+   * Also include account-level rows (`scope IS NULL`) alongside the project's own.
+   *
+   * Connecting and disconnecting belong to the account, not to any one project, so a strictly
+   * scoped read excludes them — and the timeline, which is the only reader, is scoped. The
+   * result was that session events were written and then visible nowhere at all. They are
+   * context for everything that follows ("connected, then scanned, then provisioned"), so the
+   * view that tells the story opts in.
+   */
+  includeAccountLevel?: boolean;
   kinds?: readonly EventKind[];
   limit?: number;
 }
@@ -113,7 +123,11 @@ export async function read(opts: ReadOpts = {}): Promise<BrainEvent[]> {
   const params: unknown[] = [];
   const bind = (v: unknown): string => { params.push(v); return `$${params.length}`; };
 
-  if (opts.scope !== undefined) where.push(`scope = ${bind(opts.scope)}`);
+  if (opts.scope !== undefined) {
+    where.push(opts.includeAccountLevel === true
+      ? `(scope = ${bind(opts.scope)} OR scope IS NULL)`
+      : `scope = ${bind(opts.scope)}`);
+  }
   if (opts.kinds !== undefined) {
     // An empty array must match nothing -- that is what `= ANY(ARRAY[])` means and it is the
     // honest reading of "none of these kinds". Callers wanting no filter pass undefined.
@@ -154,11 +168,16 @@ export interface HistoryStat {
  * The point of keeping history is being able to say "this is the third time" — a fact no
  * live view can produce.
  */
-export async function stats(scope?: string): Promise<HistoryStat[]> {
+export async function stats(scope?: string, opts: { includeAccountLevel?: boolean } = {}): Promise<HistoryStat[]> {
+  const filter = scope === undefined
+    ? ''
+    : opts.includeAccountLevel === true
+      ? 'WHERE (scope = $1 OR scope IS NULL)'
+      : 'WHERE scope = $1';
   const res = await withClient((c) =>
     c.query<{ kind: string; count: string; last_at: Date }>(
       `SELECT kind, count(*)::INT8 AS count, max(ts) AS last_at
-       FROM brain_events ${scope === undefined ? '' : 'WHERE scope = $1'}
+       FROM brain_events ${filter}
        GROUP BY kind ORDER BY max(ts) DESC`,
       scope === undefined ? [] : [scope],
     ));

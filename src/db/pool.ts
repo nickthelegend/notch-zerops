@@ -6,10 +6,11 @@
  * `servicehostname_ENVKEY` pattern, so this file never hand-manages a password — it reads a
  * connection string that the platform assembled.
  *
- * A failure to reach the database is a NAMED outcome rather than an empty result. Brain's
- * whole value is that memory survives a session; "the memory store is unreachable" and "there
- * are no memories" are opposite facts, and an agent handed the second when the first is true
- * will confidently start from zero.
+ * A failure to reach the database is a NAMED outcome rather than an empty result. The history
+ * is the half of this app a live view cannot give you, and "the event store is unreachable"
+ * and "nothing has happened here yet" are opposite facts. Returning the second when the first
+ * is true would report a project as untouched precisely when we cannot see what was done to
+ * it — so every read throws `StoreUnreachable` rather than quietly returning no rows.
  */
 import { config as loadDotenv } from 'dotenv';
 import pg from 'pg';

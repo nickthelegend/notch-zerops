@@ -2,7 +2,7 @@
   "name": "notch-zerops-brain",
   "version": "0.1.0",
   "private": true,
-  "description": "Brain — shared MCP memory, multi-agent coordination and infra judgement, native to Zerops",
+  "description": "Brain — see your Zerops architecture, find what your repo needs and your project is missing, and provision it",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -17,9 +17,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.22.0",
     "dotenv": "^17.4.2",
-    "nats": "^2.29.3",
     "pg": "^8.22.0",
     "zod": "^4.4.3"
   },

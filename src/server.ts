@@ -14,7 +14,7 @@
  * unreachable one look identical in a diagram, and only one of them means "you have no
  * services".
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -224,11 +224,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       /** Paste a token. Verified by a real API call, not by checking it is non-empty. */
       case '/api/session': {
         if (req.method === 'DELETE') {
-          client = null;
+          installClient(null);
           await record({ kind: 'session_closed', payload: {} });
           return sendJson(res, 200, { ok: true, message: 'token discarded' });
         }
-        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed', message: 'Use POST to open a session, or DELETE to close one.' });
         const body = (await readBody(req)) as { token?: unknown };
         const token = typeof body.token === 'string' ? body.token.trim() : '';
         if (token === '') return sendJson(res, 400, { error: 'missing_token', message: 'A Zerops Personal Access Token is required.' });
@@ -236,17 +236,38 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const candidate = new ZeropsClient(token);
         const v = await candidate.verify();
         if (!v.ok) {
-          client = null;
+          installClient(null);
           return sendJson(res, v.isAuthFailure ? 401 : 502, { error: 'token_rejected', message: v.reason });
         }
-        client = candidate;
+        installClient(candidate);
         await record({ kind: 'session_opened', payload: { email: v.email, projects: v.projectCount } });
         return sendJson(res, 200, v);
       }
 
       case '/api/session/status': {
         if (client === null) return sendJson(res, 200, { connected: false });
-        return sendJson(res, 200, { connected: true, ...(await client.verify()) });
+        const v = await client.verify();
+        /*
+         * `{ connected: true, ok: false }` was the old answer here, which is a contradiction:
+         * it reported a live session while also reporting that the token behind it does not
+         * work. A revoked token would leave the UI sitting on a dashboard it could no longer
+         * refresh.
+         *
+         * The distinction that matters is WHY verification failed. An auth failure means the
+         * credential is genuinely dead -- drop it, so the app returns to the gate and asks for
+         * a new one. Anything else (Zerops down, DNS, a 502) says nothing about the token, and
+         * throwing away a working credential because the network hiccuped would be a worse
+         * bug than the one being fixed. So that case stays connected and reports degradation.
+         */
+        if (!v.ok) {
+          if (v.isAuthFailure) {
+            installClient(null);
+            await record({ kind: 'session_closed', payload: { reason: 'token rejected by Zerops' } });
+            return sendJson(res, 200, { connected: false, reason: v.reason });
+          }
+          return sendJson(res, 200, { connected: true, degraded: true, reason: v.reason });
+        }
+        return sendJson(res, 200, { connected: true, ...v });
       }
 
       case '/api/projects': {
@@ -260,9 +281,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const c = requireClient(res);
         if (c === null) return;
         const projectId = url.searchParams.get('projectId');
-        if (projectId === null) return sendJson(res, 400, { error: 'missing_projectId' });
+        if (projectId === null) {
+          return sendJson(res, 400, { error: 'missing_projectId', message: 'Which project? A projectId is required.' });
+        }
         const project = (await c.projects()).find((p) => p.id === projectId);
-        if (project === undefined) return sendJson(res, 404, { error: 'no_such_project', projectId });
+        // Every error body carries a `message`. Without one the UI has nothing to show but
+        // the status code, and "HTTP 404" is what a user was actually shown here.
+        if (project === undefined) {
+          return sendJson(res, 404, {
+            error: 'no_such_project',
+            projectId,
+            message: 'That project is not on this account any more. It may have been deleted, or this token may belong to a different account.',
+          });
+        }
         const graph = buildGraph(project, await c.services(projectId));
         return sendJson(res, 200, { ...graph, nodes: layout(graph.nodes) });
       }
@@ -280,7 +311,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           return sendJson(res, 400, { error: 'no_such_dir', message: `${dir} does not exist on this machine` });
         }
         const project = (await c.projects()).find((p) => p.id === projectId);
-        if (project === undefined) return sendJson(res, 404, { error: 'no_such_project', projectId });
+        if (project === undefined) {
+          return sendJson(res, 404, {
+            error: 'no_such_project',
+            projectId,
+            message: 'That project is not on this account any more. It may have been deleted, or this token may belong to a different account.',
+          });
+        }
 
         const files = await readRepo(dir);
         const required = scanRepo(files);
@@ -335,7 +372,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       /** Creates real services that consume real account resources. POST, never GET. */
       case '/api/provision': {
         if (req.method !== 'POST') {
-          return sendJson(res, 405, { error: 'method_not_allowed', note: 'POST -- this creates real services on your Zerops account' });
+          return sendJson(res, 405, {
+            error: 'method_not_allowed',
+            message: 'Provisioning must be a POST -- it creates real services on your Zerops account.',
+          });
         }
         const c = requireClient(res);
         if (c === null) return;
@@ -407,9 +447,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       /** The persisted history. This is the half a live view cannot give you. */
       case '/api/history': {
         const scope = url.searchParams.get('projectId') ?? undefined;
+        // Account-level events (connecting, disconnecting) are included: they are the context
+        // for everything else in the list, and a strictly scoped read hid them entirely.
         const [events, byKind] = await Promise.all([
-          readEvents(scope === undefined ? {} : { scope, limit: 100 }),
-          stats(scope),
+          readEvents(scope === undefined ? {} : { scope, limit: 100, includeAccountLevel: true }),
+          stats(scope, { includeAccountLevel: true }),
         ]);
         return sendJson(res, 200, { events, byKind });
       }
@@ -479,22 +521,37 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       }
 
       default:
-        return sendJson(res, 404, { error: 'not_found', path });
+        return sendJson(res, 404, { error: 'not_found', path, message: `No such endpoint: ${path}` });
     }
   } catch (err) {
     sendError(res, err);
   }
 }
 
-export function startServer(port: number, host: string): Promise<void> {
+/**
+ * Install the credential this process holds. The ONE place that state changes.
+ *
+ * Both entry points into a session go through here — the `/api/session` endpoint and the
+ * development `ZEROPS_TOKEN` path — so there is a single line to look at when asking "when can
+ * this become non-null". It is exported because `ZeropsClient` takes its own `fetch`, which
+ * makes a session against a scripted Zerops constructible without a network or a real token.
+ */
+export function installClient(c: ZeropsClient | null): void {
+  client = c;
+}
+
+/** Port 0 asks the OS for a free one; the caller reads it back off the returned server. */
+export function startServer(port: number, host: string, opts: { quiet?: boolean } = {}): Promise<Server> {
   const server = createServer((req, res) => {
     handle(req, res).catch((e: unknown) => sendError(res, e));
   });
   return new Promise((ok) => {
     server.listen(port, host, () => {
-      console.log(`[brain] http://${host}:${port}`);
-      console.log('[brain] no token held yet -- paste one in the UI. It stays in memory and is never written to disk.');
-      ok();
+      if (opts.quiet !== true) {
+        console.log(`[brain] http://${host}:${port}`);
+        console.log('[brain] no token held yet -- paste one in the UI. It stays in memory and is never written to disk.');
+      }
+      ok(server);
     });
   });
 }
@@ -516,7 +573,7 @@ if (isEntryPoint()) {
   // needs it and the app does not persist one.
   const envToken = process.env['ZEROPS_TOKEN'];
   if (envToken !== undefined && envToken.trim() !== '') {
-    client = new ZeropsClient(envToken.trim());
+    installClient(new ZeropsClient(envToken.trim()));
     console.log(`[brain] using ZEROPS_TOKEN from the environment (${redactToken(envToken.trim())})`);
   }
   // Schema first: the event log is part of the product, not an optional extra, and a

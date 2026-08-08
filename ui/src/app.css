@@ -23,8 +23,26 @@ body { background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, B
 .fine { margin-top: 18px; font-size: 12px; color: var(--dim); line-height: 1.55; }
 
 /* ---------- shell ---------- */
-.app { display: grid; grid-template-columns: 1fr 380px; grid-template-rows: auto auto 1fr; height: 100vh; }
-header { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; gap: 16px;
+/*
+ * A COLUMN, not a fixed row template.
+ *
+ * This was `grid-template-rows: auto auto 1fr`, and every banner in this app is conditional
+ * -- the drift summary, the plan preview, the success note and the error all come and go. A
+ * positional row list therefore puts `.canvas` in whatever row is left over: with no banner
+ * showing it landed in the middle `auto` row, sized itself to the SIDEBAR's content, and left
+ * the `1fr` row empty. Measured at 1440x900: canvas 277px tall with 560px of dead grey below
+ * it. The app was only laid out correctly after you had scanned something, which is to say it
+ * was broken in exactly the state anybody sees first.
+ *
+ * A flex column has no positions to get wrong. Banners are added and removed freely and the
+ * canvas takes whatever is left, because that is literally what `flex: 1` means. The same bug
+ * is why the narrow-screen block below sets no row template either.
+ */
+.app { display: flex; flex-direction: column; height: 100vh; }
+header, .banner { flex: none; }
+/* min-height:0 lets the sidebar's own overflow scroll instead of stretching the page. */
+.main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 380px; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 16px;
          padding: 12px 18px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; }
 .who { color: var(--dim); font-size: 12px; margin-left: 12px; font-family: var(--mono); }
@@ -34,17 +52,20 @@ select, .dir { padding: 8px 10px; border: 1px solid var(--line); border-radius: 
 .controls button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-weight: 600; cursor: pointer; font-size: 13px; }
 .controls button:disabled { opacity: .45; cursor: not-allowed; }
 
-.banner { grid-column: 1 / -1; padding: 9px 18px; font-size: 13px; border-bottom: 1px solid var(--line); }
+.banner { padding: 9px 18px; font-size: 13px; border-bottom: 1px solid var(--line); }
 .banner.drift { background: #f7fbfa; }
 .banner.err, .err { background: #fdf0f1; color: var(--miss); border: 1px solid #f3c6cb; border-radius: 9px; padding: 10px 12px; margin-top: 12px; font-size: 13px; }
 .miss { color: var(--miss); }
 
-.canvas { position: relative; }
-aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; }
+/* min-width:0 so a wide diagram cannot push the sidebar off the right edge. */
+.canvas { position: relative; min-width: 0; min-height: 0; }
+aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; min-height: 0; }
 aside h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); margin: 16px 0 8px; font-family: var(--mono); }
 aside h3:first-child { margin-top: 0; }
 .muted { color: var(--dim); font-size: 12.5px; }
-.note { background: #f6f7f9; border-left: 2px solid var(--line); padding: 8px 11px; margin: 8px 0; font-size: 12.5px; color: #4b5563; border-radius: 0 6px 6px 0; }
+/* No left accent rail: the tinted background already separates a note from body text, and a
+   coloured bar on one edge of every block is decoration doing a job the fill already does. */
+.note { background: #f6f7f9; padding: 9px 12px; margin: 8px 0; font-size: 12.5px; color: #4b5563; border-radius: 7px; }
 
 .item { border: 1px solid var(--line); border-radius: 10px; padding: 11px; margin-bottom: 9px; }
 .item.missing { border-color: #f0c7cd; background: #fffafa; }
@@ -107,14 +128,10 @@ button.primary { background: var(--ink); color: #fff; border-color: var(--ink); 
  * the full width and nothing scrolls horizontally.
  */
 @media (max-width: 900px) {
-  /*
-   * `grid-template-rows` is deliberately NOT set here. Banners are conditional -- the drift
-   * summary, the plan preview, the success note and the error all come and go -- so any fixed
-   * row list puts the canvas in whatever row happens to be left, and it collapsed to 54px the
-   * moment a banner was absent. An explicit min-height on the canvas itself does not care how
-   * many siblings exist.
-   */
-  .app { grid-template-columns: 1fr; grid-template-rows: none; height: auto; min-height: 100vh; }
+  /* Sidebar goes UNDER the canvas so the diagram keeps the full width and nothing scrolls
+     sideways. The page grows past the viewport here, which is correct on a phone. */
+  .app { height: auto; min-height: 100vh; }
+  .main { grid-template-columns: 1fr; }
   .canvas { min-height: 60vh; }
   aside { border-left: 0; border-top: 1px solid var(--line); }
   .dir { width: 100%; }
@@ -133,18 +150,32 @@ button.primary { background: var(--ink); color: #fff; border-color: var(--ink); 
                color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
 
-.ev-row { border-left: 2px solid var(--line); padding: 8px 0 8px 11px; margin-bottom: 2px; }
-.ev-row.provision_succeeded { border-left-color: var(--accent); }
-.ev-row.provision_failed { border-left-color: var(--miss); }
+/*
+ * An actual timeline: one hairline running down the column with a dot per event.
+ *
+ * This was a 2px coloured border on the left edge of each row, which gave every entry its own
+ * slab of colour and read as decoration rather than sequence. The status signal is worth
+ * keeping — a failure and a success should not look alike — so it moved to the dot, which is
+ * where a timeline puts it anyway. Colour is never the only cue: each row is also labelled.
+ */
+.timeline { position: relative; padding-left: 18px; }
+.timeline::before { content: ''; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
+.ev-row { position: relative; padding: 8px 0; margin-bottom: 2px; }
+.ev-row::before {
+  content: ''; position: absolute; left: -17px; top: 13px; width: 7px; height: 7px;
+  border-radius: 50%; background: #fff; border: 1.5px solid var(--line); box-sizing: border-box;
+}
+.ev-row.provision_succeeded::before { border-color: var(--accent); background: var(--accent); }
+.ev-row.provision_failed::before { border-color: var(--miss); background: var(--miss); }
 /* Contention is the interesting one: it means the lock did its job. */
-.ev-row.provision_blocked { border-left-color: var(--warn); }
+.ev-row.provision_blocked::before { border-color: var(--warn); background: var(--warn); }
 .ev-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 12.5px; }
 .ev-detail { font-size: 11.5px; color: var(--dim); margin-top: 2px; word-break: break-word; }
 
 /* "Missing across 6 scans" — the claim only a persisted log can make. */
 .streak { margin-top: 6px; font-size: 11.5px; color: #8a3d4a; background: #fdf0f1;
           border-radius: 5px; padding: 4px 8px; display: inline-block; }
-.warnnote { border-left-color: var(--warn); background: #fdf8ec; }
+.warnnote { background: #fdf8ec; color: #7a611c; }
 
 /* The export link is styled as a button but stays an <a> so the browser handles download. */
 a.btn { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff;

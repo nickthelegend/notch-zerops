@@ -17,6 +17,31 @@ const SCHEMA = resolve(fileURLToPath(new URL('.', import.meta.url)), 'schema.sql
 const CUT_TABLES = ['memories', 'tickets'];
 
 /**
+ * Retire the column `actor` replaced.
+ *
+ * Adding `actor` fixed the write path but left `agent_id` sitting beside it, so a live
+ * database still printed both at boot and the schema file no longer described the table. Dead
+ * columns are how the next person ends up guessing which of two fields is authoritative.
+ *
+ * Any rows written before the rename have their value in the old column, so it is copied
+ * across before the drop -- an append-only log that loses a field during a migration is not
+ * much of a record. Guarded by a catalogue lookup so this is a no-op on a fresh database and
+ * on every boot after the first.
+ */
+const RETIRE_AGENT_ID = `
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'brain_events' AND column_name = 'agent_id'
+  ) THEN
+    UPDATE brain_events SET actor = agent_id WHERE actor IS NULL AND agent_id IS NOT NULL;
+    ALTER TABLE brain_events DROP COLUMN agent_id;
+  END IF;
+END $$;
+`;
+
+/**
  * Column reconciliation, and this exists because of a real bug rather than as belt-and-braces.
  *
  * `CREATE TABLE IF NOT EXISTS` matches on NAME, not definition. An earlier version of this
@@ -35,6 +60,29 @@ const COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition
   ['brain_events', 'payload', "JSONB NOT NULL DEFAULT '{}'::JSONB"],
 ];
 
+/**
+ * Constraints to relax on a table that already exists — the other half of the same lesson.
+ *
+ * `ADD COLUMN IF NOT EXISTS` above fixes a MISSING column. It does nothing about a column that
+ * exists with the wrong constraint, and `CREATE TABLE IF NOT EXISTS` will not either. An early
+ * version of this schema declared `scope TEXT NOT NULL`, back when every event belonged to a
+ * project; `scope` is now nullable in schema.sql because account-level events (opening and
+ * closing a session) have no project. On any database created before that change, the column
+ * was still NOT NULL.
+ *
+ * The effect was invisible and total: `record` deliberately swallows its own failures, so
+ * every `session_opened` and `session_closed` was rejected by the database and silently
+ * dropped, for the entire life of the app. The timeline had a label for "connected" that could
+ * never appear. Found by a test asserting that recording a scopeless event returns
+ * `persisted: true` — the query `SELECT count(*) FROM brain_events WHERE scope IS NULL`
+ * answered 0.
+ *
+ * DROP NOT NULL on an already-nullable column is a no-op, so this is safe on every boot.
+ */
+const RELAX_NOT_NULL: ReadonlyArray<readonly [table: string, column: string]> = [
+  ['brain_events', 'scope'],
+];
+
 export async function migrate(attempts = 10): Promise<void> {
   const sql = await readFile(SCHEMA, 'utf8');
 
@@ -51,6 +99,11 @@ export async function migrate(attempts = 10): Promise<void> {
         for (const [table, column, def] of COLUMNS) {
           await c.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${def}`);
         }
+        for (const [table, column] of RELAX_NOT_NULL) {
+          await c.query(`ALTER TABLE ${table} ALTER COLUMN ${column} DROP NOT NULL`);
+        }
+        // After the ADDs: the backfill inside it writes into `actor`.
+        await c.query(RETIRE_AGENT_ID);
       });
       const tables = await withClient((c) =>
         c.query<{ table_name: string }>(
@@ -59,11 +112,16 @@ export async function migrate(attempts = 10): Promise<void> {
       console.log(`[migrate] tables: ${tables.rows.map((r) => r.table_name).join(', ')}`);
       // Print the columns the writer depends on, so a drift like the agent_id/actor one is
       // visible at boot rather than discovered later from a swallowed insert failure.
+      // Nullability is printed alongside the names because the NOT NULL on `scope` is exactly
+      // the drift that hid for the life of the app: the column was present and correctly
+      // named, so a list of names looked perfectly healthy while every scopeless event was
+      // being rejected. A `!` here is the tell.
       const cols = await withClient((c) =>
-        c.query<{ column_name: string }>(
-          "SELECT column_name FROM information_schema.columns WHERE table_name='brain_events' ORDER BY ordinal_position",
+        c.query<{ column_name: string; is_nullable: string }>(
+          "SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name='brain_events' ORDER BY ordinal_position",
         ));
-      console.log(`[migrate] brain_events columns: ${cols.rows.map((r) => r.column_name).join(', ')}`);
+      const shown = cols.rows.map((r) => `${r.column_name}${r.is_nullable === 'NO' ? '!' : ''}`).join(', ');
+      console.log(`[migrate] brain_events columns (! = NOT NULL): ${shown}`);
       return;
     } catch (err) {
       if (!StoreUnreachable.is(err) || i === attempts) throw err;
