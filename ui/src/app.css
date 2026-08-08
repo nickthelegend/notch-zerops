@@ -126,3 +126,28 @@ button.primary { background: var(--ink); color: #fff; border-color: var(--ink); 
   .gate-card { width: 100%; padding: 24px; }
   .plan-head { flex-direction: column; align-items: flex-start; }
 }
+
+/* ---------- sidebar tabs + timeline ---------- */
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; background: none; padding: 8px 12px; font-size: 13px; font-weight: 600;
+               color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+.ev-row { border-left: 2px solid var(--line); padding: 8px 0 8px 11px; margin-bottom: 2px; }
+.ev-row.provision_succeeded { border-left-color: var(--accent); }
+.ev-row.provision_failed { border-left-color: var(--miss); }
+/* Contention is the interesting one: it means the lock did its job. */
+.ev-row.provision_blocked { border-left-color: var(--warn); }
+.ev-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.ev-detail { font-size: 11.5px; color: var(--dim); margin-top: 2px; word-break: break-word; }
+
+/* "Missing across 6 scans" — the claim only a persisted log can make. */
+.streak { margin-top: 6px; font-size: 11.5px; color: #8a3d4a; background: #fdf0f1;
+          border-radius: 5px; padding: 4px 8px; display: inline-block; }
+.warnnote { border-left-color: var(--warn); background: #fdf8ec; }
+
+/* The export link is styled as a button but stays an <a> so the browser handles download. */
+a.btn { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+        font-weight: 600; font-size: 13px; color: var(--ink); text-decoration: none; display: inline-block; }
+a.btn:hover { border-color: var(--ink); }
+a.btn.off { opacity: .45; pointer-events: none; }

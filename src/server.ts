@@ -15,6 +15,7 @@
  * services".
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
@@ -26,6 +27,10 @@ import { computeDrift } from './zerops/drift.js';
 import { SCAN_GLOBS, scanRepo, type RepoFile } from './repo/scan.js';
 import { ServiceCatalog, buildImportYaml, safeHostname } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
+import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
+import { LockManager } from './core/lock.js';
+import { getPool } from './db/pool.js';
+import { migrate } from './db/migrate.js';
 
 // fileURLToPath, not .pathname: a repo path containing a space percent-encodes and then
 // nothing resolves. Bitten by this twice on a sibling project.
@@ -47,6 +52,28 @@ const MIME: Record<string, string> = {
  * re-pasting after a restart; the benefit is that closing the app disposes of the credential.
  */
 let client: ZeropsClient | null = null;
+
+/**
+ * The provisioning lock.
+ *
+ * Provisioning is the one action here that changes somebody's infrastructure, and it is
+ * exactly the operation two people (or two agent sessions) can collide on: both scan, both
+ * see Postgres missing, both click. Zerops would reject the second import on a hostname
+ * clash, but only after having partially applied the first -- and neither caller would know
+ * why. So a project-scoped lock is taken for the duration, and the loser is told who holds it
+ * rather than being handed a confusing platform error.
+ *
+ * Events are published into the same append-only log the timeline reads, so a contention is
+ * something you can see afterwards rather than something only the loser experienced.
+ */
+const locks = new LockManager(getPool(), async (e) => {
+  await record({
+    kind: e.kind === 'lock_contended' ? 'provision_blocked' : 'provision_started',
+    scope: e.scope ?? null,
+    actor: e.agentId ?? 'ui',
+    payload: e.payload,
+  });
+});
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -198,6 +225,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       case '/api/session': {
         if (req.method === 'DELETE') {
           client = null;
+          await record({ kind: 'session_closed', payload: {} });
           return sendJson(res, 200, { ok: true, message: 'token discarded' });
         }
         if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
@@ -212,6 +240,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           return sendJson(res, v.isAuthFailure ? 401 : 502, { error: 'token_rejected', message: v.reason });
         }
         client = candidate;
+        await record({ kind: 'session_opened', payload: { email: v.email, projects: v.projectCount } });
         return sendJson(res, 200, v);
       }
 
@@ -257,7 +286,26 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const required = scanRepo(files);
         const graph = buildGraph(project, await c.services(projectId));
         const drift = computeDrift(required, graph.nodes);
+        /*
+         * `missing` is stored as a flat array of type names specifically so the history query
+         * can unnest it. Recording the whole report instead would make "how long has qdrant
+         * been missing" a JSON-shape archaeology problem rather than one GROUP BY.
+         */
+        const logged = await record({
+          kind: 'repo_scanned',
+          scope: projectId,
+          payload: {
+            dir,
+            scanned: files.map((f) => f.path),
+            missing: drift.items.filter((i) => i.status === 'missing').map((i) => i.type),
+            satisfied: drift.counts.satisfied,
+            unreferenced: drift.counts.unreferenced,
+          },
+        });
+        const history = logged.persisted ? await unresolvedDrift(projectId).catch(() => []) : [];
         return sendJson(res, 200, {
+          history,
+          ...(logged.persisted ? {} : { historyNote: `This scan was not recorded: ${logged.reason}. The findings below are still real; only the history is missing.` }),
           dir,
           scanned: files.map((f) => f.path),
           required,
@@ -298,7 +346,51 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           return sendJson(res, 400, { error: 'nothing_to_do', message: 'No resolvable services were requested.' });
         }
 
-        await c.importServices(plan.projectId, plan.yaml);
+        /*
+         * One writer per project. The TTL is short because an import is quick; if this
+         * container dies mid-request the lock frees itself rather than wedging the project.
+         */
+        /*
+         * The holder must be unique PER REQUEST, not per client.
+         *
+         * First attempt keyed this on the user-agent, and the lock then failed to block
+         * anything: `acquire` treats a same-holder acquire as an idempotent renewal (which is
+         * correct -- an agent re-acquiring its own lock should not deadlock itself), so two
+         * simultaneous requests from one browser had an identical holder, both "renewed" the
+         * same lock, and both called Zerops. The second came back with a raw
+         * "Project has already serviceStack with the same name" instead of the clean 409 this
+         * lock exists to produce. Two concurrent requests are two actors, whatever browser
+         * they came from.
+         */
+        const holder = `ui:${randomUUID()}`;
+        const got = await locks.acquire(`provision:${plan.projectId}`, holder, { scope: plan.projectId, ttlSec: 120 });
+        if (!got.ok) {
+          return sendJson(res, 409, {
+            error: 'provision_in_progress',
+            message: `Another provision is already running on this project (held by ${got.heldBy}). It frees itself in ${got.availableInSec}s.`,
+            heldBy: got.heldBy,
+            availableInSec: got.availableInSec,
+          });
+        }
+
+        try {
+          await c.importServices(plan.projectId, plan.yaml);
+          await record({
+            kind: 'provision_succeeded',
+            scope: plan.projectId,
+            payload: { created: plan.services, unresolved: plan.unresolved, yaml: plan.yaml },
+          });
+        } catch (err) {
+          await record({
+            kind: 'provision_failed',
+            scope: plan.projectId,
+            payload: { attempted: plan.services, error: err instanceof ZeropsApiError ? err.apiMessage : String(err) },
+          });
+          throw err;
+        } finally {
+          await locks.release(`provision:${plan.projectId}`, holder, plan.projectId);
+        }
+
         // Re-read rather than assume: the import being accepted is not the same as the
         // services existing, and the UI should redraw from what the platform now reports.
         const project = (await c.projects()).find((x) => x.id === plan.projectId);
@@ -310,6 +402,80 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           graph: graph === null ? null : { ...graph, nodes: layout(graph.nodes) },
           note: 'Zerops accepted the import. New services start in CREATING and take a moment to become ACTIVE -- refresh to watch them settle.',
         });
+      }
+
+      /** The persisted history. This is the half a live view cannot give you. */
+      case '/api/history': {
+        const scope = url.searchParams.get('projectId') ?? undefined;
+        const [events, byKind] = await Promise.all([
+          readEvents(scope === undefined ? {} : { scope, limit: 100 }),
+          stats(scope),
+        ]);
+        return sendJson(res, 200, { events, byKind });
+      }
+
+      /**
+       * Export a `zerops.yaml` for what the repo needs.
+       *
+       * Zerops' own workflow is an import file, so the most useful thing this app can hand
+       * back is the file the developer should have had -- committable, reviewable in a pull
+       * request, and usable with `zcli` or the GUI without Brain running at all.
+       */
+      case '/api/export': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const dir = url.searchParams.get('dir');
+        const projectId = url.searchParams.get('projectId');
+        if (dir === null || projectId === null) return sendJson(res, 400, { error: 'missing_params', message: 'dir and projectId are required' });
+        if (!existsSync(dir)) return sendJson(res, 400, { error: 'no_such_dir', message: `${dir} does not exist on this machine` });
+
+        const files = await readRepo(dir);
+        const required = scanRepo(files);
+        const catalog = new ServiceCatalog(c);
+        const ha = url.searchParams.get('ha') === 'true';
+
+        const resolved: Array<{ hostname: string; type: string; mode: 'HA' | 'NON_HA'; why: string }> = [];
+        const unresolved: string[] = [];
+        const taken: string[] = [];
+        for (const r of required) {
+          const spec = await catalog.resolve(r.type, ha);
+          if (spec === null) { unresolved.push(r.type); continue; }
+          const hostname = safeHostname(r.type, taken);
+          taken.push(hostname);
+          resolved.push({ hostname, ...spec, why: r.evidence[0]?.because ?? 'required by this repo' });
+        }
+
+        // Comments carry the evidence into the file, so a reviewer reading the pull request
+        // sees WHY each service is there without needing this app open.
+        const header = [
+          '# zerops.yaml -- generated by Brain from this repository.',
+          `# Source: ${dir}`,
+          `# Read from: ${files.map((f) => f.path).join(', ') || 'no recognised manifests'}`,
+          '#',
+          '# Every service below is here because something in the repo asked for it. The',
+          '# reason is on the line above each one. Check them before importing -- an env var',
+          '# name can point at a service that lives outside this project.',
+          ...(unresolved.length > 0
+            ? ['#', `# NOT INCLUDED (no matching Zerops service type): ${unresolved.join(', ')}`]
+            : []),
+          '',
+        ].join('\n');
+
+        const body = resolved.length === 0
+          ? 'services: []\n'
+          : 'services:\n' + resolved.map((r) =>
+              `  # ${r.why}\n  - hostname: ${r.hostname}\n    type: ${r.type}\n    mode: ${r.mode}\n`).join('');
+
+        await record({ kind: 'yaml_exported', scope: projectId, payload: { dir, services: resolved.length, unresolved } });
+
+        const yaml = header + body;
+        res.writeHead(200, {
+          'content-type': 'application/x-yaml; charset=utf-8',
+          'content-disposition': 'attachment; filename="zerops.yaml"',
+          'cache-control': 'no-store',
+        });
+        res.end(yaml);
+        return;
       }
 
       default:
@@ -353,5 +519,8 @@ if (isEntryPoint()) {
     client = new ZeropsClient(envToken.trim());
     console.log(`[brain] using ZEROPS_TOKEN from the environment (${redactToken(envToken.trim())})`);
   }
+  // Schema first: the event log is part of the product, not an optional extra, and a
+  // half-migrated database would fail on the first scan rather than at boot.
+  await migrate();
   await startServer(port, host);
 }

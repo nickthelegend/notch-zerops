@@ -31,7 +31,28 @@ interface DriftItem {
 interface DriftResp {
   dir: string; scanned: string[]; drift: { items: DriftItem[]; counts: Record<string, number>; provisionable: DriftItem[]; notes: string[] };
   graph: Graph; note?: string;
+  /** From the persisted log: how many scans have reported each type missing. */
+  history?: { type: string; scans: number; firstSeen: string; lastSeen: string }[];
+  historyNote?: string;
 }
+interface HistoryResp {
+  events: { id: string; ts: string; kind: string; actor: string | null; payload: Record<string, unknown> }[];
+  byKind: { kind: string; count: number; lastAt: string }[];
+}
+
+const KIND_LABEL: Record<string, string> = {
+  session_opened: 'connected', session_closed: 'disconnected', repo_scanned: 'scanned repo',
+  provision_started: 'provision started', provision_succeeded: 'provisioned',
+  provision_failed: 'provision failed', provision_blocked: 'blocked — another provision held the lock',
+  yaml_exported: 'exported zerops.yaml', graph_read: 'read architecture',
+};
+const ago = (iso: string): string => {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return `${Math.round(s)}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+};
 
 const nodeTypes = { service: ServiceCard };
 
@@ -40,6 +61,30 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await res.json().catch(() => ({ message: 'server sent something that is not JSON' }));
   if (!res.ok) throw new Error((body as { message?: string }).message ?? `HTTP ${res.status}`);
   return body as T;
+}
+
+/** One line a human can read, from an event payload. Never raw JSON in the UI. */
+function summarise(kind: string, p: Record<string, unknown>): string {
+  const s = (k: string): string => (typeof p[k] === 'string' ? p[k] as string : '');
+  const n = (k: string): number | null => (typeof p[k] === 'number' ? p[k] as number : null);
+  switch (kind) {
+    case 'repo_scanned': {
+      const missing = Array.isArray(p['missing']) ? (p['missing'] as string[]) : [];
+      return missing.length === 0
+        ? `${s('dir')} — nothing missing`
+        : `${missing.length} missing (${missing.join(', ')}) in ${s('dir')}`;
+    }
+    case 'provision_succeeded': {
+      const c = Array.isArray(p['created']) ? (p['created'] as { hostname: string }[]) : [];
+      return `created ${c.map((x) => x.hostname).join(', ') || '(nothing)'}`;
+    }
+    case 'provision_failed': return `Zerops refused: ${s('error')}`;
+    case 'provision_blocked': return `held by ${s('heldBy')} — this attempt was refused rather than colliding`;
+    case 'provision_started': return s('resourceId') || 'lock taken';
+    case 'session_opened': return `${s('email')} — ${n('projects') ?? 0} project(s)`;
+    case 'yaml_exported': return `${n('services') ?? 0} service(s) written to zerops.yaml`;
+    default: return Object.keys(p).slice(0, 4).join(', ') || '—';
+  }
 }
 
 export default function App() {
@@ -55,6 +100,8 @@ export default function App() {
   const [plan, setPlan] = useState<{ services: { hostname: string; type: string; mode: string }[]; yaml: string; unresolved: string[] } | null>(null);
   const [ha, setHa] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryResp | null>(null);
+  const [tab, setTab] = useState<'drift' | 'timeline'>('drift');
 
   /**
    * In-flight guard, in a ref rather than in state.
@@ -107,12 +154,18 @@ export default function App() {
     } catch (e) { setError((e as Error).message); }
   });
 
+  const loadHistory = async (pid: string) => {
+    try { setHistory(await api<HistoryResp>(`/api/history?projectId=${encodeURIComponent(pid)}`)); }
+    catch { /* history is a bonus view; failing to load it must not break the page */ }
+  };
+
   const scan = async () => guard(async () => {
     if (dir.trim() === '' || projectId === '') return;
     setError(null);
     try {
       const d = await api<DriftResp>(`/api/drift?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir.trim())}`);
       setDrift(d); setGraph(d.graph);
+      await loadHistory(projectId);
     } catch (e) { setError((e as Error).message); }
   });
 
@@ -155,6 +208,7 @@ export default function App() {
         const d = await api<DriftResp>(`/api/drift?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir.trim())}`);
         setDrift(d); setGraph(d.graph);
       }
+      await loadHistory(projectId);
     } catch (e) { setError((e as Error).message); }
   });
 
@@ -229,6 +283,14 @@ export default function App() {
             onKeyDown={(e) => { if (e.key === 'Enter') void scan(); }} />
           <button onClick={() => void scan()} disabled={busy || dir.trim() === ''}>Scan repo for drift</button>
           <button onClick={() => void loadGraph(projectId)} disabled={busy}>Refresh</button>
+          {/* A plain link, not a fetch: the browser's own download handling is more reliable
+              than reconstructing a Blob, and it works even if JS is mid-render. */}
+          <a
+            className={`btn ${dir.trim() === '' ? 'off' : ''}`}
+            href={dir.trim() === '' ? undefined : `/api/export?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir.trim())}&ha=${ha}`}
+            download="zerops.yaml"
+            title="Download a committable zerops.yaml for what this repo needs"
+          >Export zerops.yaml</a>
         </div>
       </header>
 
@@ -282,16 +344,49 @@ export default function App() {
       </div>
 
       <aside>
-        {graph !== null && (
+        <div className="tabs">
+          <button className={tab === 'drift' ? 'on' : ''} onClick={() => setTab('drift')}>Drift</button>
+          <button className={tab === 'timeline' ? 'on' : ''}
+            onClick={() => { setTab('timeline'); void loadHistory(projectId); }}>
+            Timeline{history !== null ? ` (${history.events.length})` : ''}
+          </button>
+        </div>
+
+        {tab === 'timeline' && (
+          <>
+            <h3>What Brain has done here</h3>
+            <div className="muted">
+              Read from Postgres, not from this tab&apos;s memory — it survives a refresh and a
+              server restart.
+            </div>
+            {history === null || history.events.length === 0 ? (
+              <div className="note">
+                Nothing recorded for this project yet. Scan a repo or provision something and it
+                will appear here.
+              </div>
+            ) : history.events.map((e) => (
+              <div key={e.id} className={`ev-row ${e.kind}`}>
+                <div className="ev-top">
+                  <b>{KIND_LABEL[e.kind] ?? e.kind}</b>
+                  <span className="muted">{ago(e.ts)}</span>
+                </div>
+                <div className="ev-detail">{summarise(e.kind, e.payload)}</div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {tab === 'drift' && graph !== null && (
           <>
             <h3>{graph.projectName}</h3>
             <div className="muted">{graph.nodes.length} services · {graph.edges.length} connections</div>
             {graph.notes.map((n) => <div key={n} className="note">{n}</div>)}
           </>
         )}
-        {drift !== null && (
+        {tab === 'drift' && drift !== null && (
           <>
             <h3>Drift</h3>
+            {drift.historyNote !== undefined && <div className="note warnnote">{drift.historyNote}</div>}
             {drift.note !== undefined && <div className="note">{drift.note}</div>}
             {drift.drift.items.map((i) => (
               <div key={i.status + i.type} className={`item ${i.status}`}>
@@ -301,6 +396,13 @@ export default function App() {
                   {i.required?.confidence === 'likely' && <span className="pill weak">low confidence</span>}
                 </div>
                 <div className="item-body">{i.summary}</div>
+                {/* The one thing a live view cannot say. */}
+                {(() => {
+                  const h = drift.history?.find((x) => x.type === i.type);
+                  return h !== undefined && h.scans > 1 && i.status === 'missing'
+                    ? <div className="streak">Missing across {h.scans} scans — first seen {ago(h.firstSeen)}.</div>
+                    : null;
+                })()}
                 {i.required?.evidence.map((e) => (
                   <div key={e.path + e.found} className="ev">
                     <code>{e.found}</code> in <code>{e.path}</code>

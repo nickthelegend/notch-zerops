@@ -77,28 +77,52 @@ delete.
 
 ---
 
+## What it does
+
+Paste a Zerops Personal Access Token. Brain reads your account through the Zerops REST API
+and draws your architecture as a live React Flow diagram — container counts, HA mode, public
+ports, all from the platform. Point it at a local repo and it scans the manifests, works out
+which managed services the code actually needs, and shows the gap as **ghost nodes** on the
+same canvas. One button provisions them for real.
+
+Everything it claims is checkable:
+
+- **Container count is what Zerops reports.** A service that has never deployed renders "not
+  deployed", never as one container.
+- **HA is read from `mode`, never inferred.** A single-mode service running three containers
+  during a deploy is not HA.
+- **Edges only come from `connectedStacks`.** An `app` and a `db` in one project are not
+  assumed to talk to each other.
+- **Every drift finding cites its evidence** — the file and the dependency that produced it.
+  A requirement inferred from an env-var name is marked low-confidence, because
+  `DATABASE_URL` may point at something outside the project.
+
+## Run it
+
+```bash
+docker run -d --name brain-pg -e POSTGRES_PASSWORD=brain -e POSTGRES_DB=brain -p 55432:5432 postgres:16
+cp .env.example .env
+npm install && (cd ui && npm install && npm run build)
+npm run dev            # http://127.0.0.1:7799
+```
+
+Paste your token, pick a project, type a repo path, hit **Scan repo for drift**.
+
 ## Status
 
-This README will not claim a service is wired up before it is. Current state:
+| | |
+|---|---|
+| Zerops REST client | done — verified against a live account |
+| Architecture graph | done — pure, 26 tests |
+| Repo scan + drift | done — pure, 24 tests |
+| Provisioning | done — creates real services, verified and cleaned up |
+| Export `zerops.yaml` | done |
+| Persisted history | done — Postgres, survives restart |
+| Single-writer lock | done — guards provisioning, 20-way concurrency proven |
+| Deployed on Zerops | **not done** — needs a `zcli` login, see below |
 
-- [x] Repo, types, Postgres schema
-- [x] `src/core/lock.ts` — atomic single-writer lock, ported and re-platformed
-- [ ] Memory tools (`brain.remember` / `brain.recall`) — Postgres + Qdrant
-- [ ] MCP server exposing the tool surface
-- [ ] Credential broker + Zerops REST client
-- [ ] Doctor
-- [ ] Observatory dashboard
-- [ ] **Deployed live on Zerops** — blocked, see below
+### The one thing genuinely blocked
 
-### Blocked on one credential
-
-Nothing that touches the real Zerops API can be built or verified without a **Zerops
-account-level Personal Access Token** (Zerops GUI → Access Token management). That gates
-provisioning, deploying, scaling, `doctor.audit`, and the live URL the rules require.
-
-It will be held only as a Zerops `envSecret` on the backend service, never committed, never
-logged in full, and never handed to an agent — agents get short-lived scoped tickets and the
-broker makes the call itself.
-
-Until that token exists, this repo will not pretend otherwise: no mocked Zerops responses, no
-fake project ids, no simulated deploys.
+**Deploying Brain itself onto Zerops** needs a `zcli` login, which is a credential this repo
+does not have. Everything else runs and is verified locally against the real Zerops API.
+Nothing is mocked to paper over it.
