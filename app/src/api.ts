@@ -110,6 +110,9 @@ export interface Plan {
   yaml: string;
   unresolved: string[];
   secrets: string[];
+  /** Repo variable → service. What the app needs in its own zerops.yml to reach them. */
+  wiring: Array<{ key: string; service: string }>;
+  wiringSnippet: string;
 }
 
 export interface BrainEvent {

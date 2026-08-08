@@ -23,4 +23,17 @@ zerops:
       ports:
         - port: 3000
           httpSupport: true
+      # WHERE THE WIRING BELONGS.
+      #
+      # Creating a database does not tell the app where it is. `envVariables` in the service
+      # IMPORT file is silently ignored — proved by importing a runtime whose references
+      # pointed at services that already existed and watching the container come up with none
+      # of them set, while `envSecrets` in the same file worked. The runtime's environment is
+      # declared here, in the build file, and `${hostname_key}` resolves against the project.
+      envVariables:
+        DATABASE_URL: ${postgresql_connectionString}
+        REDIS_URL: ${valkey_connectionString}
+        MEILISEARCH_URL: ${meilisearch_connectionString}
+        QDRANT_URL: ${qdrant_connectionString}
+        NATS_URL: ${nats_connectionString}
       start: node src/server.js

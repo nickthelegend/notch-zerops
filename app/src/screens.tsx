@@ -373,6 +373,21 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
                 </Text>
               </View>
 
+              {plan.wiringSnippet !== '' && (
+                <View style={{ marginTop: 10 }}>
+                  <Text style={{ color: T.warn, fontSize: 12, lineHeight: 17, marginBottom: 6 }}>
+                    Creating these does not tell your app where they are. Add this to your
+                    repository's <Text style={{ fontFamily: T.mono }}>zerops.yml</Text> — the import
+                    file cannot do it, the build file can:
+                  </Text>
+                  <View style={{ backgroundColor: T.editor, borderColor: T.line, borderWidth: 1, borderRadius: radii.input, padding: 10 }}>
+                    <Text selectable style={{ color: T.thread, fontFamily: T.mono, fontSize: 11, lineHeight: 16 }}>
+                      {plan.wiringSnippet}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
               {plan.secrets.length > 0 && (
                 <Text style={{ color: T.warn, fontSize: 12, marginTop: 10, lineHeight: 17 }}>
                   {plan.secrets.length} secret(s) found by name — {plan.secrets.join(', ')}. Zerops

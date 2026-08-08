@@ -28,7 +28,7 @@ import { compareConfig } from './zerops/config.js';
 import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
 import { deriveWiring } from './zerops/wiring.js';
 import { SCAN_GLOBS, findEnvNames, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
-import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
+import { ServiceCatalog, buildImportYaml, safeHostname, wiringSnippet, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
 import { AgentError, ask, available, brief, parseProposal, proposeInstruction } from './agents.js';
@@ -199,6 +199,10 @@ async function readRepo(dir: string): Promise<RepoFile[]> {
 interface Plan {
   projectId: string;
   services: ImportService[];
+  /** The repo variable → service mapping the app needs in its own zerops.yml. */
+  wiring: Array<{ key: string; service: string }>;
+  /** That mapping, rendered as a paste-ready `run.envVariables` block. */
+  wiringSnippet: string;
   /** Requested types the platform has no equivalent for. Reported, never silently dropped. */
   unresolved: string[];
   /** Secret env var names found in the repo, declared on the runtime. Names only. */
@@ -276,7 +280,20 @@ async function buildPlan(
     if (env.length > 0) runtime.env = env;
   }
 
-  return { projectId, services, unresolved, secrets, yaml: buildImportYaml(services) };
+  /*
+   * The wiring is REPORTED, not imported.
+   *
+   * `envVariables` in an import file is silently ignored, so emitting it there would show the
+   * user a preview of something that will not happen. It belongs in the repository's own
+   * `zerops.yml` under `run:` — so the exact block to paste is handed back instead.
+   */
+  const wiring = runtime?.env ?? [];
+  return {
+    projectId, services, unresolved, secrets,
+    yaml: buildImportYaml(services),
+    wiring: wiring.map((e) => ({ key: e.key, service: e.service })),
+    wiringSnippet: wiringSnippet(wiring),
+  };
 }
 
 async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> {

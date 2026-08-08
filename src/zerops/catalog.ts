@@ -176,11 +176,15 @@ export interface ImportService {
   /**
    * The wiring: the repo's own variable name → the service that answers it.
    *
-   * Creating a database does not tell the application where it is. Zerops publishes each
-   * managed service's address as `<hostname>_connectionString` on the project, but a runtime
-   * reads whatever name the code reads — `DATABASE_URL`, `REDIS_URL` — and nothing connects the
-   * two until somebody says so. Without this the app deploys, starts, answers health checks,
-   * and cannot reach a single one of the services provisioned for it.
+   * Carried on the plan and reported to the user, but deliberately NOT written into the import
+   * file. `envVariables` there is silently ignored — proved by importing a runtime whose
+   * references pointed at services that already existed and watching the container start with
+   * none of them set, while `envSecrets` in the very same file worked. A preview that shows
+   * wiring the import will not perform is worse than one that shows none.
+   *
+   * It belongs in the application's own `zerops.yml`, under `run:`, where `${hostname_key}`
+   * does resolve — verified: the same app went from 0/6 to 5/6 services reachable with nothing
+   * changed but that block. `wiringSnippet` renders exactly what to paste.
    */
   env?: ReadonlyArray<{ key: string; service: string }>;
 }
@@ -202,15 +206,27 @@ export function buildImportYaml(services: ReadonlyArray<ImportService>): string 
     lines.push(`    type: ${s.type}`);
     lines.push(`    mode: ${s.mode}`);
     if (s.publicUrl === true) lines.push('    enableSubdomainAccess: true');
-    if (s.env !== undefined && s.env.length > 0) {
-      // `${hostname_connectionString}` is Zerops' own reference syntax, resolved on import.
-      lines.push('    envVariables:');
-      for (const e of s.env) lines.push(`      ${e.key}: \${${e.service}_connectionString}`);
-    }
     if (s.secrets !== undefined && s.secrets.length > 0) {
       lines.push('    envSecrets:');
       for (const k of s.secrets) lines.push(`      ${k}: <@generateRandomString(<32>)>`);
     }
   }
   return lines.join('\n') + '\n';
+}
+
+/**
+ * The `run.envVariables` block this repository needs, ready to paste into its `zerops.yml`.
+ *
+ * This is the difference between an app that deploys and an app that works. Notch can create
+ * the database and it can deploy the code, but the line that tells the code where the database
+ * is lives in the build file the repository owns — so Notch writes the line out rather than
+ * reaching into somebody's repo to add it.
+ */
+export function wiringSnippet(env: ReadonlyArray<{ key: string; service: string }>): string {
+  if (env.length === 0) return '';
+  return [
+    '    run:',
+    '      envVariables:',
+    ...env.map((e) => `        ${e.key}: \${${e.service}_connectionString}`),
+  ].join('\n');
 }
