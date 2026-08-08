@@ -75,8 +75,18 @@ export function toMermaid(input: MermaidInput): string {
         ? id(`s_${nodes.find((n) => n.typeName.toLowerCase().replace(/[^a-z0-9]/g, '').includes(e.to))?.name ?? e.to}`)
         : missing.includes(e.to) ? id(`g_${e.to}`) : null;
       if (target === null || target === anchor) continue;
-      // `-.->` for a connection the code makes that the platform has not been told about.
-      out.push(`  ${anchor} ${e.deployed ? '-->' : '-.->'}|${label(e.found)}| ${target}`);
+      /*
+       * The edge label is QUOTED, and it has to be.
+       *
+       * An unquoted `@aws-sdk/client-s3` does not parse: Mermaid reads the `@` as the start of
+       * a link id and fails with "Expecting AMP, COLON, PIPE… got LINK_ID". Every label here is
+       * an npm package name straight out of somebody's package.json, so scoped packages are the
+       * common case rather than the exotic one — and the first real export of this feature
+       * produced a diagram that rendered as GitHub's error box.
+       *
+       * `-.->` for a connection the code makes that the platform has not been told about.
+       */
+      out.push(`  ${anchor} ${e.deployed ? '-->' : '-.->'}|"${label(e.found)}"| ${target}`);
     }
   }
 

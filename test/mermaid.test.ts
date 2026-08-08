@@ -40,15 +40,15 @@ describe('toMermaid', () => {
 
   it('draws an underived connection dashed and a deployed one solid', () => {
     const dashed = toMermaid(base);
-    expect(dashed).toContain('-.->|pg|');
+    expect(dashed).toContain('-.->|"pg"|');
     const solid = toMermaid({
       ...base,
       missing: [],
       nodes: [node({ id: 'a', name: 'app' }), node({ id: 'b', name: 'db', typeName: 'PostgreSQL', kind: 'database' })],
       edges: [{ to: 'postgresql', found: 'pg', confidence: 'strong', deployed: true }],
     });
-    expect(solid).toContain('-->|pg|');
-    expect(solid).not.toContain('-.->|pg|');
+    expect(solid).toContain('-->|"pg"|');
+    expect(solid).not.toContain('-.->|"pg"|');
   });
 
   it('escapes ids that would end a Mermaid token', () => {
@@ -84,7 +84,21 @@ describe('toMermaid', () => {
       ...base, missing: [],
       edges: [{ to: 'nodejs', found: 'self', confidence: 'strong', deployed: true }],
     });
-    expect(out).not.toContain('|self|');
+    expect(out).not.toContain('|"self"|');
+  });
+
+  /*
+   * The case the first real export failed on. Edge labels are npm package names taken straight
+   * from a package.json, so a scoped one is the common case — and unquoted, Mermaid reads the
+   * `@` as the start of a link id and refuses the whole diagram.
+   */
+  it('quotes an edge label so a scoped package name cannot end the token', () => {
+    const out = toMermaid({
+      ...base,
+      edges: [{ to: 'postgresql', found: '@aws-sdk/client-s3', confidence: 'strong', deployed: false }],
+    });
+    expect(out).toContain('|"@aws-sdk/client-s3"|');
+    expect(out).not.toContain('|@aws-sdk/client-s3|');
   });
 
   it('produces a graph with no unbalanced brackets', () => {
