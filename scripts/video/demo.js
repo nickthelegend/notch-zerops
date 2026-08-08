@@ -158,7 +158,18 @@
     ping();
     fire(el, c.x, c.y);
     el.focus();
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    /*
+     * The setter has to come from the element's OWN prototype.
+     *
+     * React tracks the last value it wrote and ignores an input event whose value it thinks it
+     * already knows, so the native setter has to be called directly rather than assigning
+     * `el.value`. Using HTMLInputElement's setter on a <textarea> throws "Illegal invocation" —
+     * which is exactly how the Design tab killed a take.
+     */
+    const proto = el instanceof window.HTMLTextAreaElement
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
     let acc = '';
     for (const ch of text) {
       acc += ch;
@@ -215,122 +226,244 @@
 
   /* --------------------------------------------------------------- take */
 
-  async function run() {
-    // 01 — the gate.
-    line('01-intro');
-    await glide(innerWidth * 0.5, innerHeight * 0.55, 1400);
-    await hold();
+  /* ------------------------------------------------------- extra helpers */
 
-    // 02 — the token.
-    line('02-token');
-    await typeInto(document.querySelector('input'), CFG.token, 30);
-    await clickText('Connect', { settle: 200 });
-    await until('the dashboard', () => /New project/.test(text()), 60000);
-    await hold();
+  /** The scrolling pane of whichever tab is open. RNW ScrollViews are just overflow divs. */
+  const pane = () =>
+    [...document.querySelectorAll('div')]
+      .filter((e) => e.scrollHeight > e.clientHeight + 40 && e.clientHeight > 260)
+      .sort((a, b) => b.clientHeight - a.clientHeight)[0] ?? document.scrollingElement;
 
-    // 03 — a real, empty project.
-    line('03-create');
-    await clickText('New project', { settle: 600 });
-    await until('the create form', () => /CREATE AN EMPTY PROJECT/.test(text()));
-    await typeInto([...document.querySelectorAll('input')]
-      .find((i) => (i.placeholder || '').includes('project name')), CFG.project);
-    await clickText('Create', { settle: 400 });
-    await until('the new project', () => text().includes(CFG.project), 120000);
-    await hold();
+  async function scroll(px, steps = 4) {
+    const p = pane();
+    for (let i = 0; i < steps; i += 1) { p.scrollTop += px / steps; await sleep(420); }
+  }
 
-    // 04 — point at the repository.
-    line('04-picker');
-    await typeInto([...document.querySelectorAll('input')]
-      .find((i) => (i.placeholder || '').includes('/path')), CFG.repo, 42);
-    await hold();
+  const sel = (q) => document.querySelector(q);
 
-    // 05 — scan, and the gaps land on the board.
-    line('05-scan');
-    await clickText('Scan repo', { settle: 200 });
-    await until('the scan', () => /Drift \(\d+\)/.test(text()), 120000);
-    await glide(innerWidth * 0.30, innerHeight * 0.45, 1200);
-    await glide(innerWidth * 0.52, innerHeight * 0.60, 1500);
-    await hold();
+  /** Tabs carry counts, so they are matched loosely. */
+  const tab = (name) =>
+    byTextRe(new RegExp('^' + name + '( \\(\\d+\\))?$')) ?? byText(name);
 
-    // 06 — the evidence.
-    line('06-evidence');
-    await click(byTextRe(/^Drift \(\d+\)$/), { settle: 500 });
-    const pane = document.scrollingElement ?? document.documentElement;
-    pane.scrollTop = 0;
-    await glide(innerWidth * 0.4, innerHeight * 0.6, 900);
-    for (let i = 0; i < 4; i += 1) { pane.scrollTop += 170; await sleep(500); }
-    await hold();
+  const openTab = async (name) => { await click(tab(name), { settle: 700 }); };
 
-    // 07 — config drift: the quiet failure.
-    line('07-config');
-    pane.scrollTop = 0;
-    await sleep(500);
-    await glide(innerWidth * 0.4, innerHeight * 0.38, 1000);
-    await hold();
-
-    // 08 — the agents already on this machine.
-    line('08-agent');
-    await glide(innerWidth * 0.88, innerHeight * 0.12, 1100);
-    await glide(innerWidth * 0.93, innerHeight * 0.12, 900);
-    await glide(innerWidth * 0.86, innerHeight * 0.30, 1200);
-    await hold();
-
-    // 09 — ask one to draft the fix. Real agent, real repo.
-    line('09-draft');
-    await clickText('Draft a fix', { settle: 400 });
-    await hold();
-
-    // 10 — what it drafted, in the preview a human confirms.
-    line('10-plan');
-    await until('the drafted plan', () => /THIS WILL CREATE/.test(text()), 240000);
-    const pre = [...document.querySelectorAll('div')]
-      .find((e) => e.textContent.startsWith('services:') && e.children.length === 0);
-    let sc = pre;
-    while (sc && sc.scrollHeight <= sc.clientHeight + 4) sc = sc.parentElement;
-    if (sc) { const to = sc.scrollHeight; for (let i = 1; i <= 20; i += 1) { sc.scrollTop = (to * i) / 20; await sleep(80); } }
-    await glide(innerWidth * 0.4, innerHeight * 0.25, 1100);
-    await hold();
-
-    // 11 — write it.
-    line('11-provision');
-    await clickText('Confirm and create', { settle: 200 });
-    await hold();
-
-    // 12 — the result.
-    silent('11-wait');
-    await until('Zerops to accept the import', () => /Zerops accepted the import/.test(text()), 300000);
-    await sleep(700);
-    line('12-after');
-    await hold();
-
-    // 13 — the view Zerops does not have.
-    line('13-envs');
-    await clickText('Environments', { settle: 500 });
+  /** react-native-web renders Switch as a checkbox; a real click on it flips the state. */
+  async function toggle(nth = 0) {
+    const boxes = [...document.querySelectorAll('input[type="checkbox"]')];
+    const el = boxes[nth];
+    if (el === undefined) throw new Error('toggle: no switch found');
+    const c = centre(el);
+    await glide(c.x, c.y);
+    ping();
+    el.click();
     await sleep(400);
-    const other = byTextRe(/^vs /);
-    if (other) await click(other, { settle: 600 });
-    await until('the comparison', () => /DIFFERENCES/.test(text()), 120000);
+  }
+
+  /** Drag a node on the React Flow canvas, with the drawn cursor following. */
+  async function dragNode(matchText, dx, dy) {
+    const n = [...document.querySelectorAll('.react-flow__node')]
+      .find((e) => e.textContent.includes(matchText));
+    if (n === undefined) throw new Error('dragNode: no node containing ' + matchText);
+    const r = n.getBoundingClientRect();
+    const x0 = Math.round(r.x + r.width / 2);
+    const y0 = Math.round(r.y + 24);           // grab the card's head, not a handle
+    await glide(x0, y0);
+    const base = { bubbles: true, cancelable: true, view: window, pointerId: 1, isPrimary: true, button: 0 };
+    n.dispatchEvent(new PointerEvent('pointerdown', { ...base, clientX: x0, clientY: y0 }));
+    n.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x0, clientY: y0, button: 0, view: window }));
+    const steps = 22;
+    for (let i = 1; i <= steps; i += 1) {
+      const x = x0 + (dx * i) / steps;
+      const y = y0 + (dy * i) / steps;
+      P.x = x; P.y = y; draw();
+      document.dispatchEvent(new PointerEvent('pointermove', { ...base, clientX: x, clientY: y }));
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y, view: window }));
+      await sleep(18);
+    }
+    document.dispatchEvent(new PointerEvent('pointerup', { ...base, clientX: x0 + dx, clientY: y0 + dy }));
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x0 + dx, clientY: y0 + dy, view: window }));
+    await sleep(450);
+  }
+
+  /** Pan the canvas by dragging empty pane in hand mode. */
+  async function panCanvas(dx, dy) {
+    const p = document.querySelector('.react-flow__pane');
+    if (p === null) return;
+    const x0 = Math.round(innerWidth * 0.30);
+    const y0 = Math.round(innerHeight * 0.80);
+    await glide(x0, y0);
+    const base = { bubbles: true, cancelable: true, view: window, pointerId: 1, isPrimary: true, button: 0 };
+    p.dispatchEvent(new PointerEvent('pointerdown', { ...base, clientX: x0, clientY: y0 }));
+    p.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x0, clientY: y0, button: 0, view: window }));
+    for (let i = 1; i <= 18; i += 1) {
+      const x = x0 + (dx * i) / 18, y = y0 + (dy * i) / 18;
+      P.x = x; P.y = y; draw();
+      document.dispatchEvent(new PointerEvent('pointermove', { ...base, clientX: x, clientY: y }));
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y, view: window }));
+      await sleep(20);
+    }
+    document.dispatchEvent(new PointerEvent('pointerup', { ...base, clientX: x0 + dx, clientY: y0 + dy }));
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x0 + dx, clientY: y0 + dy, view: window }));
+    await sleep(400);
+  }
+
+  /* --------------------------------------------------------------- take */
+
+  async function run() {
+    /* ---- 04 · the gate -------------------------------------------- */
+    line('04-token');
+    await sleep(700);
+    await typeInto(sel("input[placeholder='paste it here']"), CFG.token, 34);
+    await clickText('Connect');
+    await until('the dashboard', () => /New project/.test(text()), 90000);
     await hold();
 
-    // 14 — how it compares, and what it refuses to compare.
-    line('14-envs2');
-    for (let i = 0; i < 4; i += 1) { pane.scrollTop += 190; await sleep(520); }
+    /* ---- 05 · the board ------------------------------------------- */
+    line('05-board');
+    await click(byTextRe(/^test · \w+$/), { settle: 900 });
+    await until('the canvas', () => document.querySelectorAll('.react-flow__node').length > 0, 60000);
+    await dragNode('ubuntu', 150, -90);
+    await click(sel('[title="Pan"]'), { settle: 260 });
+    await panCanvas(150, -60);
+    await click(sel('[title="Zoom in"]'), { settle: 400 });
+    await click(sel('[title="Fit to view"]'), { settle: 700 });
+    await click(sel('[title="Select"]'), { settle: 260 });
     await hold();
 
-    // 17 — the persisted history. (15 and 16 are the terminal take.)
-    line('17-timeline');
-    pane.scrollTop = 0;
-    await sleep(300);
-    await click(byTextRe(/^Timeline \(\d+\)$/), { settle: 500 });
-    await glide(innerWidth * 0.4, innerHeight * 0.45, 900);
-    for (let i = 0; i < 3; i += 1) { pane.scrollTop += 150; await sleep(600); }
+    /* ---- 07 · add a service by hand -------------------------------- */
+    line('07-add');
+    await click(sel('[title="Add a service"]'), { settle: 500 });
+    await until('the palette', () => sel("input[placeholder='Search services…']") !== null);
+    await typeInto(sel("input[placeholder='Search services…']"), 'post', 12);
+    await sleep(700);
+    await click(byText('PostgreSQL'), { settle: 900 });
+    await until('the ghost', () => /added by you/.test(text()), 20000);
+    await glide(innerWidth * 0.55, innerHeight * 0.62, 900);
     await hold();
 
-    // 18 — close on the board.
-    line('18-close');
-    pane.scrollTop = 0;
-    await clickText('Architecture', { settle: 500 });
-    await glide(innerWidth * 0.42, innerHeight * 0.5, 1600);
+    /* ---- 08 · point it at a repository ----------------------------- */
+    line('08-scan');
+    await typeInto(sel("input[placeholder='/path/to/your/repo']"), CFG.repo, 40);
+    await clickText('Scan repo');
+    await until('the scan', () => /Drift \(\d+\)/.test(text()), 180000);
+    await sleep(900);
+    await click(sel('[title="Fit to view"]'), { settle: 900 });
+    await hold();
+
+    /* ---- 06 · blast radius ----------------------------------------- */
+    line('06-blast');
+    const rt = [...document.querySelectorAll('.react-flow__node')]
+      .find((e) => /ubuntu|nodejs/.test(e.textContent));
+    if (rt) await click(rt, { settle: 1100 });
+    await glide(innerWidth * 0.5, innerHeight * 0.55, 1200);
+    await hold();
+    const paneEl = document.querySelector('.react-flow__pane');
+    if (paneEl) await click(paneEl, { settle: 500 });
+
+    /* ---- 09 · evidence ---------------------------------------------- */
+    line('09-evidence');
+    await openTab('Drift');
+    await scroll(520, 5);
+    await hold();
+
+    /* ---- 10 · config drift ------------------------------------------ */
+    line('10-config');
+    await scroll(620, 5);
+    await hold();
+    pane().scrollTop = 0;
+
+    /* ---- 11 · committed secrets -------------------------------------- */
+    line('11-secrets');
+    await typeInto(sel("input[placeholder='/path/to/your/repo']"), CFG.leaky, 46);
+    await clickText('Scan repo');
+    await until('the sweep', () => /Secrets \((?!0\))\d+\)/.test(text()), 180000);
+    await openTab('Secrets');
+    await sleep(600);
+    await scroll(420, 4);
+    await hold();
+    pane().scrollTop = 0;
+
+    /* ---- 12 · the architect ------------------------------------------ */
+    line('12-design');
+    await click(byTextRe(/^acme-notes-live · \w+$/), { settle: 1200 });
+    await openTab('Design');
+    await typeInto(document.querySelector('textarea'),
+      "I'm building a chat app with search and analytics", 22);
+    await hold();
+    await clickText('Design it', { settle: 400 });
+
+    silent('S1-thinking');
+    await until('the agent to answer', () => /CONSIDERED AND TURNED DOWN|CHOSE/.test(text()), 300000);
+    await sleep(600);
+
+    /* ---- 13 · the rejections ------------------------------------------ */
+    line('13-rejected');
+    await scroll(700, 6);
+    await hold();
+    await scroll(620, 5);
+    pane().scrollTop = 0;
+
+    /* ---- 14 · autopilot, disarmed ------------------------------------- */
+    line('14-auto-intro');
+    await openTab('Autopilot');
+    await sleep(500);
+    await glide(innerWidth * 0.22, innerHeight * 0.40, 900);
+    await hold();
+
+    /* ---- 15 · the measurement ----------------------------------------- */
+    line('15-auto-run');
+    await clickText('Run a cycle', { settle: 400 });
+    await hold();
+    silent('S2-watching');
+    await until('the panel to report', () => /WHAT THE PANEL SAID/.test(text()), 420000);
+    await sleep(800);
+
+    /* ---- 16 · the argument --------------------------------------------- */
+    line('16-auto-panel');
+    await scroll(560, 5);
+    await hold();
+
+    /* ---- 17 · armed ----------------------------------------------------- */
+    line('17-auto-apply');
+    pane().scrollTop = 0;
+    await sleep(400);
+    await toggle(0);                       // arm it
+    await sleep(700);
+    await clickText('Run a cycle and apply', { settle: 400 });
+    await hold();
+    silent('S3-applying');
+    await until('the second decision', () => /WHAT WAS DECIDED/.test(text()), 480000);
+    await sleep(900);
+    await scroll(900, 7);
+    await sleep(1400);
+
+    /* ---- 18 · the receipts ------------------------------------------------ */
+    line('18-actions');
+    pane().scrollTop = 0;
+    await openTab('Actions');
+    await sleep(900);
+    await scroll(520, 5);
+    await hold();
+
+    /* ---- 19 · environments ------------------------------------------------- */
+    line('19-envs');
+    pane().scrollTop = 0;
+    await openTab('Environments');
+    await sleep(500);
+    const other = byTextRe(/^vs \S+/);
+    if (other) await click(other, { settle: 900 });
+    await until('the comparison', () => /DIFFERENCES/.test(text()), 120000).catch(() => {});
+    await scroll(380, 4);
+    await hold();
+
+    /* ---- 20 · what it will not claim ---------------------------------------- */
+    line('20-honest');
+    pane().scrollTop = 0;
+    await openTab('Actions');
+    await sleep(500);
+    await toggle(0);                        // "only what changed something"
+    await sleep(900);
+    await glide(innerWidth * 0.45, innerHeight * 0.42, 1100);
     await hold();
 
     log('DEMO_DONE ' + JSON.stringify({ ms: Math.round(performance.now() - T0), marks }));
@@ -338,5 +471,5 @@
   }
 
   window.__demo = { run, marks: () => marks };
-  log('DEMO_READY');
+  log("DEMO_READY");
 })();

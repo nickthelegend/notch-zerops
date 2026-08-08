@@ -3,76 +3,88 @@
   "speed": 1.0,
   "segments": [
     {
-      "id": "01-intro",
-      "text": "Zerops deploys what you tell it to. Notch tells you what you forgot. This is a desktop app that holds your git repository against your live Zerops account and finds the difference. Everything here runs against a real account over the real API. Nothing is mocked."
+      "id": "01-problem",
+      "text": "Zerops deploys exactly what you tell it. Nobody tells it everything \u2014 your code picks up a search engine on a Tuesday, and the project never hears about it."
     },
     {
-      "id": "02-token",
-      "text": "It starts with a Zerops personal access token, verified by a real call rather than by checking that it looks like a token. It is held in the daemon's memory for this session only — never written to disk, never logged, never sent anywhere but Zerops."
+      "id": "02-wall",
+      "text": "Three times building this, the platform returned two hundred and did nothing. Import variables ignored. An autoscaling body one level too shallow \u2014 accepted, finished, applied to nothing. You only catch those by reading the value back."
     },
     {
-      "id": "03-create",
-      "text": "Let's start from nothing. Notch is explicit that this creates a real, billable project, and that it starts empty. Creating infrastructure and filling it are two different decisions, so they are two different buttons."
+      "id": "03-built",
+      "text": "So Notch holds your repo against your live account, proves every gap with a line of code, and lets agents argue about the fix."
     },
     {
-      "id": "04-picker",
-      "text": "Now point it at a repository. This one is a Node API that needs Postgres for records, Valkey for sessions, Meilisearch for search, Qdrant for embeddings, NATS for background jobs, and object storage for uploads."
+      "id": "04-token",
+      "text": "It starts with a Zerops access token, checked by a real API call rather than by the shape of the string. Memory only. Never on disk, never logged, only ever shown redacted."
     },
     {
-      "id": "05-scan",
-      "text": "Notch reads the package manifest and the environment files and compares what it finds against what the project actually runs. Seven services missing — and they're drawn inside the project they're missing from, because a project with holes in it should look like a project with holes in it."
+      "id": "05-board",
+      "text": "This is the board. Real nodes on a real canvas \u2014 drag them, pan, zoom, fit. The arrangement is remembered per project, so your layout survives a rescan."
     },
     {
-      "id": "06-evidence",
-      "text": "Every finding cites the line that produced it. Meilisearch is here because the code imports the meilisearch client. Notch never asserts a requirement it cannot point at a file for, and anything inferred only from an environment variable name is marked low confidence, because a name is weaker evidence than an import."
+      "id": "06-blast",
+      "text": "Click a service and everything more than one hop away dims. That is what a diagram is for: what else breaks if this goes down. The runtime touches everything except the two services the platform runs for itself."
     },
     {
-      "id": "07-config",
-      "text": "And this is the failure that gets through every other check. Nine variables the code reads that this project does not define. A missing service fails loudly at deploy time. A missing variable does not: the image builds, the container starts, health checks pass, and the first request that needs a signing secret throws. Notch reads the names only — never the values."
+      "id": "07-add",
+      "text": "You can place a service by hand. It joins the same plan the scanner feeds, and it lands dashed, because nothing is created until you confirm the import file."
     },
     {
-      "id": "08-agent",
-      "text": "Down the side are the coding agents already installed on this machine — Claude Code, Codex, OpenCode, Gemini. No API keys; Notch drives the ones you already pay for, and hands them the live state of the project, its gaps, and the evidence behind each one."
+      "id": "08-scan",
+      "text": "Now point it at a repository. Notch reads the manifests and compares them against what the project actually runs. Six services missing, drawn inside the project that is missing them."
     },
     {
-      "id": "09-draft",
-      "text": "So let's ask one to draft the fix. What comes back is not a file — it's a list of services with a reason for each. The daemon builds the actual import file, resolving versions from the live catalogue. The agent gets judgement about what and why, and no authority to act."
+      "id": "09-evidence",
+      "text": "Every finding cites the line that produced it. Qdrant, because the code imports the Qdrant client. Object storage, because it imports the S3 SDK. Nothing is claimed that cannot point at a file."
     },
     {
-      "id": "10-plan",
-      "text": "Here's what it drafted, in the same preview a human confirms. Notice object storage was proposed and is not in the file: the catalogue has no Zerops type for it, so the agent could ask for it but could not conjure one. The secrets are Zerops generator expressions, not values — the platform generates them during the import, so nothing is copied out of your repository."
+      "id": "10-config",
+      "text": "It reads the other direction too \u2014 variables the app expects that this project does not define. The database exists, and the code still cannot reach it."
     },
     {
-      "id": "11-provision",
-      "text": "Confirm, and these are real services being created on a real account."
+      "id": "11-secrets",
+      "text": "And the opposite problem: a credential already in your repository. Only files git tracks, because a dot env that git ignores is where it belongs. Notice what is not on screen. A finding is a file, a line, and a kind \u2014 never the secret itself."
     },
     {
-      "id": "12-after",
-      "text": "Six of the seven are satisfied. The seventh stays a ghost and says why, rather than being quietly dropped to make the number look better."
+      "id": "12-design",
+      "text": "Describe what you are building. An agent picks the services from what this account can actually create."
     },
     {
-      "id": "13-envs",
-      "text": "Now the view Zerops does not have. Zerops shows one project at a time, and one project at a time is exactly how development, staging and production drift apart. Hold two against each other and Notch compares presence, version, failover mode, public routing, and which variable names are defined."
+      "id": "13-rejected",
+      "text": "The interesting half is what it turned down. Typesense over Meilisearch, because chat search is filter first \u2014 scope every query to your rooms or it leaks messages. And no to Qdrant, because finding messages that mean something similar is not finding the message where Ana said deploy."
     },
     {
-      "id": "14-envs2",
-      "text": "Services are matched by type rather than hostname, because a database called db in staging and postgresql in production is the same service wearing two names. Container counts are deliberately not compared — those legitimately differ, and including them would bury the lines that matter."
+      "id": "14-auto-intro",
+      "text": "Now the part that is not a linter. Three agents watch a live service and argue about resizing it. Disarmed, with a ceiling, because containers cost money."
     },
     {
-      "id": "15-ci",
-      "text": "But the real answer is that none of this should need a human to remember to look. The same engine runs headless. Notch check reads the repository, reads the target project, and exits non-zero when the code needs infrastructure the project has not got."
+      "id": "15-auto-run",
+      "text": "Notch puts real traffic through the deployed URL and measures what comes back, then reads the containers and the policy from the platform."
     },
     {
-      "id": "16-ci2",
-      "text": "Six services and nine variables missing, each citing the dependency that proves it, as annotations on the pull request. And a check that cannot look never exits zero — if the token is wrong or the API is down it returns two and says so, because reporting all clear because you could not see would be worse than having no gate at all."
+      "id": "16-auto-panel",
+      "text": "Each agent argues one side. Capacity sees zero failures across twenty-four requests and says there is no evidence the container is struggling. Cost will not pay for capacity it cannot prove is needed. Reliability points out that one container is a single point of failure. Two of three have to agree, and a tie holds."
     },
     {
-      "id": "17-timeline",
-      "text": "Everything is written to Postgres as it happens, so the timeline survives a reload and a daemon restart. That a service is missing right now is something anyone can compute. That it has been missing across three scans since Tuesday requires having written the earlier answers down."
+      "id": "17-auto-apply",
+      "text": "Armed, it makes the call, then reads the range back \u2014 because two hundred from this endpoint means the request was well formed and nothing more."
     },
     {
-      "id": "18-close",
-      "text": "That's Notch. Your repository and your infrastructure, held against each other — with the evidence for every claim, a history that remembers, agents that draft but never act, and a gate that fails the build before the merge. Zerops deploys what you tell it. Notch tells you what you forgot."
+      "id": "18-actions",
+      "text": "The receipts. Every request Notch made to Zerops, with status and timing, and the ones that changed something marked as writes. A search is a read, even though Zerops does it with a POST."
+    },
+    {
+      "id": "19-envs",
+      "text": "It will hold two projects against each other and show where staging and production drifted. Matched by service type, not by hostname."
+    },
+    {
+      "id": "20-honest",
+      "text": "Twenty-four calls this session, and not one of them changed your account. The panel voted to hold, so Notch held. When it does write, it lands right here with its status."
+    },
+    {
+      "id": "21-outro",
+      "text": "All of it real. A live URL answering two hundred, two hundred and eighty seven tests, every finding traceable to a line. Notch tells you what you forgot, before the pull request merges."
     }
   ]
 }

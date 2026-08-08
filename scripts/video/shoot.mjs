@@ -9,12 +9,12 @@
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUT = process.argv[2] ?? join(HERE, 'out');
+const OUT = resolve(process.argv[2] ?? join(HERE, 'out'));
 const DAEMON = 'http://127.0.0.1:7799';
 const CDP = 'http://127.0.0.1:9222';
 
@@ -117,7 +117,36 @@ console.log('window geometry:', JSON.stringify(geom), '-> crop', JSON.stringify(
 const durations = Object.fromEntries(
   JSON.parse(readFileSync(join(HERE, 'audio', 'manifest.json'), 'utf8')).map((s) => [s.id, s.seconds]),
 );
-await evaluate(`window.__DEMO_CFG = ${JSON.stringify({ durations, token: TOKEN, repo: REPO, project: PROJECT })};`);
+/*
+ * A repository with credentials genuinely committed to it.
+ *
+ * Built fresh for the take rather than kept in the tree: the secrets sweep only reports files
+ * `git ls-files` returns, so the fixture has to be a real git repo with a real commit — and a
+ * real commit containing a real-looking AWS key is not something to leave lying in a public
+ * repository just to have something to demo. Created here, thrown away after.
+ *
+ * The keys are correctly shaped and valid nowhere.
+ */
+const LEAKY = join(OUT, 'leaky-fixture');
+mkdirSync(LEAKY, { recursive: true });
+writeFileSync(join(LEAKY, '.env'), [
+  'DATABASE_URL=postgres://app:s3cr3tpassw0rd@db.internal:5432/app',
+  'SESSION_SECRET=8f3aa1cd94be40729ab55e17c0d3f0a1',
+  'STRIPE_PUBLISHABLE_KEY=pk_test_51H8sldkfjaldkfjaldkfjalskdj',
+  'API_TOKEN=your-token-here',
+  '',
+].join('\n'));
+writeFileSync(join(LEAKY, 'deploy.sh'),
+  '#!/bin/sh\nexport AWS_ACCESS_KEY_ID=AKIAQYLPO4EXAMPLE123\naws s3 sync ./dist s3://bucket\n');
+writeFileSync(join(LEAKY, 'package.json'),
+  JSON.stringify({ name: 'acme-web', dependencies: { pg: '^8.11.0', express: '^4.19.2' } }, null, 2) + '\n');
+for (const args of [['init', '-q'], ['add', '-A'],
+  ['-c', 'user.email=demo@notch.local', '-c', 'user.name=demo', 'commit', '-qm', 'initial']]) {
+  try { execFileSync('git', ['-C', LEAKY, ...args], { stdio: 'ignore' }); } catch { /* already there */ }
+}
+console.log('leaky fixture:', LEAKY);
+
+await evaluate(`window.__DEMO_CFG = ${JSON.stringify({ durations, token: TOKEN, repo: REPO, project: PROJECT, leaky: LEAKY })};`);
 await evaluate(readFileSync(join(HERE, 'demo.js'), 'utf8'));
 if ((await evaluate('typeof window.__demo')) !== 'object') throw new Error('driver did not install');
 console.log('driver injected.');
@@ -135,6 +164,30 @@ console.log('driver injected.');
  */
 function sh(cmd, args) {
   try { return execFileSync(cmd, args, { encoding: 'utf8' }); } catch { return ''; }
+}
+
+/*
+ * Only one process may hold the avfoundation screen device.
+ *
+ * A hung capture from somewhere else on the machine does not make ffmpeg fail — it makes it
+ * wait, silently, forever. A take sat blocked on this for fourteen minutes behind a stale
+ * two-second probe belonging to another project, with no output to say why. So every capture
+ * gets a deadline, and a blocked device is reported as a blocked device.
+ */
+function ffCapture(args, timeoutMs, what) {
+  try {
+    execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args],
+      { stdio: 'inherit', timeout: timeoutMs, killSignal: 'SIGKILL' });
+  } catch (e) {
+    if (e.signal === 'SIGKILL' || e.killed === true) {
+      const holders = sh('pgrep', ['-fl', 'ffmpeg.*avfoundation']).trim();
+      throw new Error(
+        `${what} did not finish within ${Math.round(timeoutMs / 1000)}s — the screen capture ` +
+        `device is almost certainly held by another process.\n` +
+        (holders === '' ? '  Nothing else obviously holds it.' : `  Currently capturing:\n    ${holders.split('\n').join('\n    ')}`));
+    }
+    throw e;
+  }
 }
 
 /**
@@ -173,10 +226,10 @@ async function verifyCapture() {
   const shot = join(OUT, 'preflight-capture.png');
   const ref = join(OUT, 'preflight-app.png');
 
-  execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error',
+  ffCapture([
     '-f', 'avfoundation', '-capture_cursor', '0', '-framerate', '30', '-i', '0:none', '-t', '1.2',
     '-vf', `crop=${CROP.w}:${CROP.h}:${CROP.x}:${CROP.y}`, '-c:v', 'libx264', '-preset', 'ultrafast',
-    '-pix_fmt', 'yuv420p', probe], { stdio: 'inherit' });
+    '-pix_fmt', 'yuv420p', probe], 25_000, 'the preflight capture');
   execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error',
     '-sseof', '-0.5', '-i', probe, '-frames:v', '1', shot]);
 
@@ -231,6 +284,36 @@ const args = [
   '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
   join(OUT, 'raw.mp4'),
 ];
+/*
+ * Hold the window at the front, and keep holding it.
+ *
+ * Take three completed every beat and produced 360 seconds of somebody else's browser: a
+ * window came forward partway through and the crop went on faithfully recording that rectangle
+ * of screen. `avfoundation` captures a DISPLAY, not a window, so nothing downstream can tell
+ * the difference — the file looks fine, it is just the wrong picture.
+ *
+ * So the app is raised before the capture and re-raised on a timer, and the frontmost process
+ * is checked while the take runs. Also `caffeinate`, because this take spends two minutes
+ * waiting on agents with no input, which is exactly how a display decides to sleep.
+ */
+const frontmost = () =>
+  sh('osascript', ['-e', 'tell application "System Events" to get name of first application process whose frontmost is true']).trim();
+
+const raise = () => sh('osascript', ['-e', 'tell application "Electron" to activate']);
+
+raise();
+await sleep(900);
+if (frontmost() !== 'Electron') {
+  throw new Error(`could not bring the app to the front — "${frontmost()}" is frontmost. ` +
+                  'Close whatever is holding focus and run again.');
+}
+const caffeine = spawn('caffeinate', ['-disu'], { stdio: 'ignore', detached: true });
+let stolenBy = null;
+const holdFocus = setInterval(() => {
+  const f = frontmost();
+  if (f !== 'Electron') { stolenBy = f; raise(); }
+}, 4000);
+
 console.log(`recording ${CROP.w}x${CROP.h} at (${CROP.x},${CROP.y})…`);
 const ff = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'inherit'] });
 await sleep(2500);                       // let the encoder settle before beat one
@@ -288,15 +371,21 @@ const prints = points.map(frameAt);
 const diffs = prints.slice(1).map((p, i) =>
   p.reduce((s, v, k) => s + Math.abs(v - prints[i][k]), 0) / p.length);
 const frozen = diffs.filter((d) => d < 2).length;
+clearInterval(holdFocus);
+try { process.kill(-caffeine.pid); } catch { /* already gone */ }
+if (stolenBy !== null) {
+  console.error(`\nFOCUS WAS STOLEN during the take (by "${stolenBy}"). It was pushed back, but ` +
+                'some frames will show the wrong window. Re-record.');
+}
+
 console.log(
   `motion check: ${diffs.length - frozen}/${diffs.length} intervals show movement ` +
   `(min ${Math.min(...diffs).toFixed(1)}, max ${Math.max(...diffs).toFixed(1)})`);
-if (frozen > diffs.length / 4) {
+if (frozen > diffs.length * 0.72) {
   console.error(
-    `\nTHE PICTURE STOPPED CHANGING for ${frozen} of ${diffs.length} intervals. The window was ` +
-    'not being repainted to the screen for part of the take, even though the driver ran ' +
-    'correctly and the app did the work. Re-record with the Notch window frontmost and nothing ' +
-    'stealing focus.');
+    `\nTHE PICTURE BARELY CHANGED — ${frozen} of ${diffs.length} intervals are identical. ` +
+    'Long still stretches are expected while agents think and load runs, but not this many: ' +
+    'the window was probably not being repainted. Re-record with Notch frontmost.');
   process.exit(3);
 }
 

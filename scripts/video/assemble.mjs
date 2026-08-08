@@ -10,7 +10,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -54,10 +54,21 @@ const plan = marks.map((m, i) => {
   const start = m.atMs / 1000;
   const nextSame = marks.slice(i + 1).find((n) => sourceOf(n) === src);
   const end = nextSame === undefined ? durOf.get(src) : nextSame.atMs / 1000;
-  const span = Math.max(0.1, end - start);
+  const fullSpan = Math.max(0.1, end - start);
   const audio = m.silent ? 0 : (dur[m.id] ?? 0);
-  const target = m.silent ? Math.min(span, SILENT_CAP) : audio + BREATH;
-  return { ...m, src, start, end, span, audio, target };
+  const target = m.silent ? Math.min(fullSpan, SILENT_CAP) : audio + BREATH;
+  /*
+   * A silent span is TRIMMED, not ramped.
+   *
+   * These are the stretches where the app is waiting on an agent — forty seconds of an almost
+   * unchanging screen. Speeding that up 8x produces a blurred smear that says nothing, so the
+   * first few seconds are taken at real speed and the rest is simply cut. It also means a
+   * blemish deeper into the wait never reaches the edit: another application stole focus for
+   * about five seconds nineteen seconds into one of these, and trimming from the front skips
+   * it without pretending it did not happen.
+   */
+  const span = m.silent ? Math.min(fullSpan, target) : fullSpan;
+  return { ...m, src, start, end, span, fullSpan, audio, target };
 });
 
 console.log('id                span    audio   target  action');
@@ -84,7 +95,7 @@ for (const [i, p] of plan.entries()) {
     }
   }
   console.log(
-    `${p.id.padEnd(16)} ${p.span.toFixed(2).padStart(6)} ${p.audio.toFixed(2).padStart(7)} ` +
+    `${p.id.padEnd(16)} ${p.fullSpan.toFixed(2).padStart(6)} ${p.audio.toFixed(2).padStart(7)} ` +
     `${p.target.toFixed(2).padStart(7)}  ${action}`);
 
   const base = ['-ss', p.start.toFixed(3), '-t', p.span.toFixed(3), '-i', p.src];
@@ -112,8 +123,55 @@ for (const [i, p] of plan.entries()) {
   parts.push(out);
 }
 
+/*
+ * The bookends.
+ *
+ * Rendered by HyperFrames at exactly the length of their own narration, so they need no ramp
+ * and no hold — the WAVs are simply laid onto them. Encoded to the SAME codec, rate and pixel
+ * format as the screen segments, because `concat -c copy` will happily join streams that do
+ * not match and produce a file that plays for eight seconds and then stops.
+ */
+function bookend(name, wavIds) {
+  const src = join(TAKE, `${name}.mp4`);
+  let vid;
+  try { vid = probe(src); } catch { console.log(`(no ${name}.mp4 — skipping)`); return null; }
+
+  const out = join(work, `${name}-av.mp4`);
+  const wavList = join(work, `${name}-audio.txt`);
+  writeFileSync(wavList, wavIds.map((id) => `file '${join(HERE, 'audio', `${id}.wav`)}'`).join('\n'));
+  const joined = join(work, `${name}.wav`);
+  ff(['-f', 'concat', '-safe', '0', '-i', wavList, '-c', 'copy', joined]);
+
+  ff([
+    '-i', src, '-i', joined,
+    '-vf', `scale=${W}:${H}:flags=lanczos,setsar=1`,
+    '-af', 'apad', '-shortest',
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-r', '30',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+    out,
+  ]);
+  console.log(`${name.padEnd(16)} ${vid.toFixed(2).padStart(6)} ${'—'.padStart(7)} ${vid.toFixed(2).padStart(7)}  bookend`);
+  return { file: out, seconds: vid, wavIds };
+}
+
+const intro = bookend('intro', ['01-problem', '02-wall', '03-built']);
+const outro = bookend('outro', ['21-outro']);
+
+const ordered = [
+  ...(intro === null ? [] : [intro.file]),
+  ...parts,
+  ...(outro === null ? [] : [outro.file]),
+];
+
 const list = join(work, 'concat.txt');
-writeFileSync(list, parts.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
+/*
+ * Absolute paths in the concat list.
+ *
+ * `ffmpeg -f concat` resolves each entry relative to the LIST FILE, not to the working
+ * directory — so a relative `out/segments/x.mp4` written into `out/segments/concat.txt`
+ * becomes `out/segments/out/segments/x.mp4` and the whole assembly fails on the first line.
+ */
+writeFileSync(list, ordered.map((p) => `file '${resolve(p).replace(/'/g, "'\\''")}'`).join('\n'));
 ff(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', OUT]);
 
 /* ------------------------------------------------------------------ srt */
@@ -129,6 +187,13 @@ const texts = Object.fromEntries(
   JSON.parse(readFileSync(join(HERE, 'narration.json'), 'utf8')).segments.map((s) => [s.id, s.text]));
 
 let t = 0, n = 0, srt = '';
+const cue = (id, seconds) => {
+  n += 1;
+  srt += `${n}\n${srtTime(t)} --> ${srtTime(t + seconds)}\n${texts[id]}\n\n`;
+  t += seconds;
+};
+// The intro's three lines run back to back over its 34.5s, so they are cued in sequence.
+if (intro !== null) for (const id of intro.wavIds) cue(id, dur[id] ?? 0);
 for (const p of plan) {
   if (p.audio > 0) {
     n += 1;
@@ -136,6 +201,7 @@ for (const p of plan) {
   }
   t += p.target;
 }
+if (outro !== null) for (const id of outro.wavIds) cue(id, dur[id] ?? 0);
 writeFileSync(OUT.replace(/\.mp4$/, '.srt'), srt);
 
 const finalDur = probe(OUT);

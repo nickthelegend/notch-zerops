@@ -15,3 +15,11 @@ app/.expo/
 # Recording artifacts (large; the video is delivered as a file, not committed)
 scripts/video/out/
 scripts/video/audio/
+
+# Recording artefacts. The take, the frames and the fixtures are rebuilt by shoot.mjs;
+# the finished video is delivered, not versioned.
+scripts/video/out/
+scripts/video/audio/
+scripts/video/intro/node_modules/
+scripts/video/outro/node_modules/
+scripts/video/bookends/

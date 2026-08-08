@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      /*
+        The intro is cut to the narration, not the other way round. Every clip's data-start and
+        data-duration below is the measured length of its Kokoro WAV, so the type lands with the
+        sentence rather than near it.
+
+        Palette is Notch's own "quiet graphite" — the same tokens the app ships. An intro in a
+        different visual world than the product it introduces is a title sequence for a
+        different film.
+      */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        width: 1920px; height: 1080px; overflow: hidden;
+        background: #111111;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      :root {
+        --bg:#111111; --panel:#1a1a1a; --raised:#242424; --line:#2a2a2a;
+        --text:#e0e0e0; --dim:#888888; --faint:#555555; --bright:#f5f5f5;
+        --violet:#a78bfa; --cyan:#67e8f9; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+      }
+      .clip { position: absolute; inset: 0; }
+      .pad { position: absolute; left: 160px; right: 160px; top: 0; bottom: 0;
+             display: flex; flex-direction: column; justify-content: center; }
+
+      .eyebrow { font-family: var(--mono); font-size: 22px; letter-spacing: .34em;
+                 text-transform: uppercase; color: #9a9a9a; }
+      h1 { font-size: 104px; font-weight: 800; letter-spacing: -.035em; line-height: 1.02;
+           color: var(--text); }
+      h1 em { font-style: normal; color: var(--violet); }
+      .sub { font-size: 34px; color: var(--dim); line-height: 1.45; max-width: 1180px; }
+
+      /* dotted ground, the app's own canvas texture */
+      .dots { position: absolute; inset: 0;
+              background-image: radial-gradient(#242424 1.4px, transparent 1.4px);
+              background-size: 26px 26px; }
+
+      /* --- the drift diagram --- */
+      .drift { display: flex; align-items: center; gap: 44px; margin-top: 58px; }
+      .box { background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+             padding: 26px 30px; min-width: 330px; }
+      .box .k { font-family: var(--mono); font-size: 17px; letter-spacing: .2em;
+                color: #9a9a9a; text-transform: uppercase; }
+      .box .rows { margin-top: 16px; display: flex; flex-direction: column; gap: 9px; }
+      .row { font-family: var(--mono); font-size: 25px; color: var(--dim); }
+      .row.new { color: var(--cyan); }
+      .row.gap { color: var(--err); }
+      .arrow { font-size: 46px; color: #9a9a9a; }
+
+      /* --- the three silent 200s --- */
+      .cards { display: flex; gap: 26px; margin-top: 56px; }
+      .card { flex: 1; background: var(--panel); border: 1px solid var(--line);
+              border-left: 4px solid var(--err); border-radius: 16px; padding: 28px 30px; }
+      .card .code { font-family: var(--mono); font-size: 21px; color: var(--ok); }
+      .card .what { font-size: 27px; color: var(--text); margin-top: 14px; line-height: 1.34; font-weight: 600; }
+      .card .did  { font-family: var(--mono); font-size: 20px; color: var(--err); margin-top: 14px; }
+
+      /* --- wordmark --- */
+      .mark { display: flex; align-items: baseline; gap: 26px; }
+      .mark .n { font-size: 150px; font-weight: 800; letter-spacing: -.05em; color: var(--bright); }
+      .mark .tag { font-family: var(--mono); font-size: 24px; letter-spacing: .2em;
+                   text-transform: uppercase; color: var(--violet); }
+      .rule { height: 1px; background: var(--line); margin: 40px 0; }
+
+      /* --- outro stats --- */
+      .stats { display: flex; gap: 22px; margin-top: 54px; }
+      .stat { flex: 1; background: var(--panel); border: 1px solid var(--line);
+              border-radius: 16px; padding: 30px 32px; }
+      .stat .v { font-family: var(--mono); font-size: 62px; font-weight: 600; letter-spacing: -.02em;
+                 color: var(--bright); line-height: 1; }
+      .stat .v.ok { color: var(--ok); }
+      .stat .k { font-family: var(--mono); font-size: 18px; letter-spacing: .18em;
+                 text-transform: uppercase; color: #9a9a9a; margin-top: 16px; }
+      .url { font-family: var(--mono); font-size: 30px; color: var(--cyan); margin-top: 46px; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="outro" data-start="0" data-duration="13.31"
+         data-width="1920" data-height="1080" style="position:absolute; inset:0;">
+      <div class="dots"></div>
+      <div id="o1" class="clip" data-start="0" data-duration="13.31" data-track-index="1">
+        <div class="pad">
+          <div class="mark">
+            <div class="n" id="o1n">Notch</div>
+            <div class="tag" id="o1t">it tells you what you forgot</div>
+          </div>
+          <div class="stats">
+            <div class="stat hf-stat">
+              <div class="v ok">HTTP 200</div>
+              <div class="k">deployed and answering</div>
+            </div>
+            <div class="stat hf-stat">
+              <div class="v">287</div>
+              <div class="k">tests passing</div>
+            </div>
+            <div class="stat hf-stat">
+              <div class="v">9/9</div>
+              <div class="k">secrets generated by the platform</div>
+            </div>
+            <div class="stat hf-stat">
+              <div class="v">0</div>
+              <div class="k">mocks</div>
+            </div>
+          </div>
+          <div class="url" id="o1u">nodejs-2c25-3000.prg1.zerops.app</div>
+        </div>
+      </div>
+    </div>
+
+        <script>
+      window.__timelines = window.__timelines || {};
+      const outro = gsap.timeline({ paused: true });
+      outro.from("#o1n", { opacity: 0, y: 28, duration: .8 }, 0.15)
+           .from("#o1t", { opacity: 0, x: -18, duration: .6 }, 0.6)
+           .from(".hf-stat", { opacity: 0, y: 26, duration: .6, stagger: .18 }, 1.2)
+           .from("#o1u", { opacity: 0, duration: .7 }, 3.0);
+      window.__timelines["outro"] = outro;
+    </script>
+  </body>
+</html>
