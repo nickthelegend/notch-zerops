@@ -33,8 +33,8 @@ forgot — before the PR merges, with the line of code that proves it.**
 15. `—` Scope the CI check to the branch diff, not the whole repo
 16. `—` Failed check opens a PR containing the fix
 17. `—` Time-travel scrubber over the event log
-18. `—` Blast radius: click a service, highlight what depends on it
-19. `—` Secret hygiene: a real-looking secret committed to a tracked file
+18. `✅` Blast radius: click a service, highlight what depends on it
+19. `✅` Secret hygiene: a real-looking secret committed to a tracked file
 20. `—` Cost delta of a plan before provisioning
 
 ## Tier 3 — real value, more work
@@ -54,26 +54,26 @@ forgot — before the PR merges, with the line of code that proves it.**
 
 31. `✅` Empty state on the board before the first scan that teaches the next action
 32. `—` Skeleton while the graph loads rather than a blank canvas
-33. `—` Ghost tiles pulse gently so a gap reads as unfinished, not broken
-34. `—` Edge draw-on animation when a scan completes
+33. `✅` Ghost tiles pulse gently so a gap reads as unfinished, not broken
+34. `✅` Edge draw-on animation when a scan completes
 35. `—` Count-up on the drift metrics
 36. `—` Tile flip from ghost to real when a service is provisioned
 37. `—` Snap-to-grid while dragging with a visible guide
 38. `✅` Marquee select and move several tiles
 39. `—` Minimap for large projects
 40. `✅` Pinch/scroll zoom on the canvas
-41. `—` Focus mode: dim everything but one service and its neighbours
+41. `✅` Focus mode: dim everything but one service and its neighbours
 42. `—` Colour-blind-safe palette toggle
-43. `—` Reduced-motion respect for every animation
+43. `✅` Reduced-motion respect for every animation
 44. `—` Sound design on provision complete (off by default)
 45. `—` Confetti-free success state that still feels like an event
 
 ## Tier 5 — production readiness
 
-46. `—` Retry with backoff on a Zerops 5xx
-47. `—` Offline detection with a banner, not a silent failure
+46. `✅` Retry with backoff on a Zerops 5xx
+47. `✅` Offline detection with a banner, not a silent failure
 48. `—` Request cancellation when the project changes mid-flight
-49. `—` Rate-limit handling with a visible countdown
+49. `◐` Rate-limit handling — Retry-After is honoured; no countdown
 50. `—` A daemon health indicator in the title bar
 51. `—` Structured log file for the daemon
 52. `—` Crash reporter that writes the last 100 events
@@ -133,7 +133,7 @@ forgot — before the PR merges, with the line of code that proves it.**
 94. `—` License scan of provisioned services
 95. `—` Architecture decision record generation
 96. `—` Diagram export to SVG/PNG for docs
-97. `—` Mermaid export of the architecture
+97. `✅` Mermaid export of the architecture
 98. `—` Public status page generated from the board
 99. `—` Onboarding tour on first run
 100. `—` Plugin API for custom scanners

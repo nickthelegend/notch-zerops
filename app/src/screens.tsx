@@ -13,7 +13,7 @@ import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented,
 import { ArchCanvas, type Board, type Ghost } from './arch';
 import { ChatPanel } from './chat';
 import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
-import { api, type BrainEvent, type Comparison, type DriftResp, type Graph, type Hygiene, type Plan, type Project, type Session } from './api';
+import { api, onReachChange, type BrainEvent, type Comparison, type DriftResp, type Graph, type Hygiene, type Plan, type Project, type Reach, type Session } from './api';
 
 /* ------------------------------------------------------------------ gate */
 
@@ -90,6 +90,12 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   /** Services placed on the board by hand, folded into the same provision plan. */
   const [added, setAdded] = useState<string[]>([]);
   const [hygiene, setHygiene] = useState<Hygiene | null>(null);
+  /**
+   * Whether the daemon is answering. Not `navigator.onLine` — the daemon is on loopback, so
+   * the machine can be off the network with everything working, and on it with the daemon dead.
+   */
+  const [reach, setReach] = useState<Reach>('ok');
+  useEffect(() => onReachChange(setReach), []);
   const [created, setCreated] = useState<string | null>(null);
   /** A one-off confirmation with its own label — “CREATED” is wrong for three of the four. */
   const [notice, setNotice] = useState<{ label: string; text: string } | null>(null);
@@ -373,6 +379,28 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
               }}
             />
           )}
+          {projectId !== '' && (
+            <Btn
+              small
+              label="Copy diagram"
+              onPress={() => void guard(async () => {
+                setError(null);
+                try {
+                  const text = await api.mermaid(projectId, dir.trim());
+                  /*
+                   * Straight to the clipboard, not to a file. The next thing anybody does with
+                   * a Mermaid block is paste it into a README or a PR description, and a
+                   * download would put a step in the way of the only use it has.
+                   */
+                  await navigator.clipboard.writeText(text);
+                  setNotice({
+                    label: 'COPIED',
+                    text: `A Mermaid diagram of this project is on your clipboard — ${text.split('\n').length} lines. Paste it into a README and GitHub renders it.`,
+                  });
+                } catch (e) { setError(`Could not build the diagram: ${(e as Error).message}`); }
+              })}
+            />
+          )}
         </View>
       </View>
 
@@ -403,6 +431,22 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
 
       {/* ---- banners ---- */}
       {error !== null && <View style={{ padding: spacing.md }}><Callout label="ERROR" text={error} tint={T.err} /></View>}
+      {/*
+        The daemon stopped answering.
+
+        Above everything, and it stays until a call succeeds — a dead daemon makes every other
+        thing on this screen a lie, including the parts that still look fine because they were
+        fetched a minute ago.
+      */}
+      {reach === 'unreachable' && (
+        <View style={{ padding: spacing.md, paddingBottom: 0 }}>
+          <Callout
+            label="NOT ANSWERING"
+            tint={T.err}
+            text={'The Brain daemon stopped responding. Everything on screen is from the last successful call and may already be wrong. Notch retries reads automatically; this clears itself when one gets through.'}
+          />
+        </View>
+      )}
       {notice !== null && <View style={{ padding: spacing.md }}><Callout label={notice.label} text={notice.text} tint={T.ok} /></View>}
       {deployed !== null && (
         <View style={{ padding: spacing.md }}>

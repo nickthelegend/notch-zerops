@@ -27,6 +27,7 @@ import { computeDrift } from './zerops/drift.js';
 import { compareConfig } from './zerops/config.js';
 import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
 import { deriveWiring } from './zerops/wiring.js';
+import { toMermaid } from './zerops/mermaid.js';
 import { SCAN_GLOBS, findEnvNames, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
 import { sweep } from './repo/secrets.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, wiringSnippet, type ImportService } from './zerops/catalog.js';
@@ -569,6 +570,65 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           },
         }).catch(() => null);
         return sendJson(res, 200, report);
+      }
+
+      /*
+        * The board as text you can commit.
+        *
+        * A diagram inside a desktop app helps whoever has the app open; a Mermaid block in the
+        * README helps the person who arrives in eight months, and GitHub renders it with
+        * nothing installed. Served as text/plain so the browser shows it rather than
+        * downloading it — the usual next action is to select it and paste.
+        */
+      case '/api/mermaid': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const projectId = url.searchParams.get('projectId');
+        const dir = url.searchParams.get('dir') ?? '';
+        if (projectId === null) {
+          return sendJson(res, 400, { error: 'missing_params', message: 'projectId is required' });
+        }
+        const project = (await c.projects()).find((p) => p.id === projectId);
+        if (project === undefined) {
+          return sendJson(res, 404, { error: 'no_such_project', message: 'That project is not on this account any more.' });
+        }
+        const graph = buildGraph(project, await c.services(projectId));
+
+        /*
+         * A scan is optional here. Without one you still get the services that exist, which is
+         * a useful diagram; with one you also get the gaps and the edges. Requiring a directory
+         * would make the cheap version of this feature impossible.
+         */
+        let missing: string[] = [];
+        let wiring: ReturnType<typeof deriveWiring> | null = null;
+        let repo: { name: string; satisfied: number; missing: number } | null = null;
+        if (dir !== '' && existsSync(dir)) {
+          const files = await readRepo(dir);
+          const required = scanRepo(files);
+          const drift = computeDrift(required, graph.nodes);
+          missing = drift.items.filter((i) => i.status === 'missing').map((i) => i.type);
+          wiring = deriveWiring(required, graph.nodes, graph.edges.length);
+          repo = {
+            name: dir.split('/').filter(Boolean).pop() ?? dir,
+            satisfied: drift.counts['satisfied'] ?? 0,
+            missing: drift.counts['missing'] ?? 0,
+          };
+        }
+
+        const text = toMermaid({
+          projectName: graph.projectName,
+          nodes: graph.nodes,
+          missing,
+          runtime: wiring?.runtime ?? null,
+          edges: wiring?.edges ?? [],
+          repo,
+        });
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        res.end(text);
+        return;
       }
 
       case '/api/drift': {

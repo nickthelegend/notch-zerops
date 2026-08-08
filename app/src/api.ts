@@ -152,26 +152,82 @@ export interface Session { email: string; projectCount: number; tokenHint: strin
 export interface Project { id: string; name: string; status: string }
 
 /**
+ * Is the daemon there at all?
+ *
+ * Distinct from `navigator.onLine`, which reports whether the machine has a network — and this
+ * app's server is on loopback, so the machine can be offline with everything working, or fully
+ * online with the daemon dead. Only one of those is worth a banner, so only one is watched.
+ */
+export type Reach = 'ok' | 'unreachable';
+let reach: Reach = 'ok';
+const watchers = new Set<(r: Reach) => void>();
+
+export function onReachChange(fn: (r: Reach) => void): () => void {
+  watchers.add(fn);
+  fn(reach);
+  return () => { watchers.delete(fn); };
+}
+
+function setReach(next: Reach): void {
+  if (next === reach) return;
+  reach = next;
+  for (const w of watchers) w(next);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Which failures are worth trying again. A 400 will be a 400 next time too. */
+const retriable = (status: number): boolean => status === 429 || status === 502 || status === 503 || status === 504;
+
+/**
  * Every call goes through here so no screen has to think about error shapes.
  *
  * A non-2xx carries a `message` from the daemon; a bare status code is never shown, because
  * "HTTP 404" tells a user neither what failed nor what to do about it.
+ *
+ * RETRIES ARE ONLY FOR IDEMPOTENT READS. A GET that 502s is worth trying again; a POST is not,
+ * because the daemon may well have created the thing before the connection dropped and a
+ * second attempt would create it twice. Provisioning infrastructure is the specific case where
+ * an automatic retry is the wrong instinct, so this refuses to have it.
  */
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(`${BASE}${path}`, { cache: 'no-store', ...init });
-  } catch {
-    throw new Error(`Could not reach the Brain daemon at ${BASE || 'this origin'}. Is it running?`);
-  }
-  const text = await res.text();
-  let body: unknown = null;
-  try { body = text === '' ? null : JSON.parse(text); } catch { body = null; }
-  if (!res.ok) {
+  const idempotent = (init?.method ?? 'GET').toUpperCase() === 'GET';
+  const attempts = idempotent ? 3 : 1;
+  let lastMessage = '';
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}${path}`, { cache: 'no-store', ...init });
+    } catch {
+      if (attempt < attempts) { await sleep(attempt * 400); continue; }
+      setReach('unreachable');
+      throw new Error(`Could not reach the Brain daemon at ${BASE || 'this origin'}. Is it running?`);
+    }
+
+    const text = await res.text();
+    let body: unknown = null;
+    try { body = text === '' ? null : JSON.parse(text); } catch { body = null; }
+
+    if (res.ok) { setReach('ok'); return body as T; }
+
     const msg = (body as { message?: string } | null)?.message;
-    throw new Error(msg ?? `The daemon rejected that request (HTTP ${res.status}) without saying why.`);
+    lastMessage = msg ?? `The daemon rejected that request (HTTP ${res.status}) without saying why.`;
+
+    if (retriable(res.status) && attempt < attempts) {
+      /*
+       * Honour Retry-After when the far side sent one — Zerops does on a 429, and guessing a
+       * shorter delay than it asked for is how a rate limit becomes a ban.
+       */
+      const after = Number(res.headers.get('retry-after') ?? '');
+      await sleep(Number.isFinite(after) && after > 0 ? Math.min(after * 1000, 8000) : attempt * 700);
+      continue;
+    }
+    // A reachable daemon that says no is not an outage.
+    setReach('ok');
+    throw new Error(lastMessage);
   }
-  return body as T;
+  throw new Error(lastMessage);
 }
 
 const json = (b: unknown): RequestInit => ({
@@ -225,6 +281,13 @@ export const api = {
    * export silently did nothing in the desktop build because of it, so the origin is
    * spelled out rather than inherited.
    */
+  /** The board as a Mermaid block. Plain text on purpose — the next action is copy. */
+  mermaid: (projectId: string, dir: string) =>
+    fetch(`${BASE}/api/mermaid?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir)}`,
+      { cache: 'no-store' }).then(async (r) => {
+      if (!r.ok) throw new Error(`Could not build the diagram (HTTP ${r.status}).`);
+      return r.text();
+    }),
   exportUrl: (projectId: string, dir: string, ha: boolean) =>
     `${BASE === '' ? globalThis.location.origin : BASE}` +
     `/api/export?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir)}&ha=${ha}`,
