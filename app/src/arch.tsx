@@ -104,7 +104,7 @@ function GhostNode({ data }: NodeProps) {
   const weak = g.confidence === 'likely';
   const tint = added ? T.primary : weak ? T.warn : T.err;
   return (
-    <div style={{ ...card, background: 'transparent', border: `1px dashed ${tint}`, boxShadow: 'none' }}>
+    <div className="notch-ghost" style={{ ...card, background: 'transparent', border: `1px dashed ${tint}`, boxShadow: 'none' }}>
       <Handle type="target" position={Position.Left} style={{ background: tint, width: 7, height: 7 }} />
       <div style={{ color: tint, fontSize: 14 }}>◌</div>
       <div style={{ color: T.text, fontWeight: 700, fontSize: 13.5, marginTop: 8 }}>{g.type}</div>
@@ -303,6 +303,15 @@ function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [tool, setTool] = useState<Tool>('select');
+  /**
+   * Blast radius: the node you asked about, or null for the whole board.
+   *
+   * "What else breaks if this goes down" is the question a diagram is FOR, and it is the one
+   * a static picture cannot answer — on a real project the arrows cross and you end up tracing
+   * them with a finger. Clicking a node answers it by removing everything that is not part of
+   * the answer, which is faster to read than anything additive would be.
+   */
+  const [focus, setFocus] = useState<string | null>(null);
 
   /**
    * Saved positions win, so an arrangement survives a rescan and a restart.
@@ -376,7 +385,24 @@ function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
       return gh === undefined ? null : `g:${gh.type}`;
     };
 
-    const rt = wiring?.runtime === undefined || wiring?.runtime === null ? null : idFor(wiring.runtime);
+    /*
+     * The runtime is found by KIND, not by name.
+     *
+     * `wiring.runtime` is the language the scanner detected — `nodejs`. The service running it
+     * is called whatever the account called it, and on this account that is `ubuntu` with a
+     * typeName of `Ubuntu`. Matching those two strings finds nothing, so an earlier version of
+     * this drew a board with six missing services and not one edge between them: the wiring
+     * was computed correctly and then thrown away at the last step.
+     *
+     * `kind === 'runtime'` comes from the graph builder and cannot miss. The name is only used
+     * to break a tie when a project runs more than one.
+     */
+    const runtimes = graph.nodes.filter((n) => n.kind === 'runtime');
+    const wanted = (wiring?.runtime ?? '').toLowerCase();
+    const rtNode = runtimes.find((n) =>
+      n.typeName.toLowerCase().includes(wanted) || n.name.toLowerCase().includes(wanted))
+      ?? runtimes[0];
+    const rt = rtNode === undefined ? null : `s:${rtNode.id}`;
     if (repo !== null && rt !== null) {
       out.push({
         id: 'repo->runtime', source: 'repo', target: rt, animated: true,
@@ -400,6 +426,46 @@ function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
     }
     return out;
   }, [graph.nodes, ghosts, repo, wiring]);
+
+  /**
+   * The focused node plus everything one hop away, in either direction.
+   *
+   * One hop, not the transitive closure. On this shape of graph — a runtime fanning out to its
+   * managed services — the closure is the whole board, so it would dim nothing and answer
+   * nothing. One hop is the actual question: what talks to this.
+   */
+  const lit = useMemo<Set<string> | null>(() => {
+    if (focus === null) return null;
+    const near = new Set<string>([focus]);
+    for (const e of edges) {
+      if (e.source === focus) near.add(e.target);
+      if (e.target === focus) near.add(e.source);
+    }
+    return near;
+  }, [focus, edges]);
+
+  /** Dimming happens here rather than in the node components, so the rule lives in one place. */
+  const shown = useMemo<Node[]>(() => (
+    lit === null ? nodes : nodes.map((n) => (
+      lit.has(n.id) ? n : { ...n, style: { ...n.style, opacity: 0.18 } }
+    ))
+  ), [nodes, lit]);
+
+  const shownEdges = useMemo<Edge[]>(() => (
+    lit === null ? edges : edges.map((e) => {
+      const on = lit.has(e.source) && lit.has(e.target);
+      return on
+        ? { ...e, style: { ...e.style, strokeWidth: 2.4 }, animated: true }
+        : { ...e, style: { ...e.style, opacity: 0.12 }, animated: false, label: undefined };
+    })
+  ), [edges, lit]);
+
+  const focused = focus === null ? null : nodes.find((n) => n.id === focus) ?? null;
+  const focusName = focused === null ? '' :
+    focused.type === 'repo' ? 'this repository'
+      : focused.type === 'ghost' ? (focused.data['ghost'] as Ghost).type
+        : (focused.data['node'] as ArchNode).name;
+  const neighbours = lit === null ? 0 : lit.size - 1;
 
   const existing = useMemo(
     () => new Set([...graph.nodes.map((n) => n.typeName.toLowerCase()), ...ghosts.map((g) => g.type)]),
@@ -431,11 +497,43 @@ function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
         }
         .react-flow__pane.draggable { cursor: grab; }
         .react-flow__pane.dragging { cursor: grabbing; }
+
+        /* Focus dimming is a transition, not a jump — the eye has to follow what stayed. */
+        .react-flow__node, .react-flow__edge { transition: opacity 180ms ease; }
+
+        /*
+          A gap breathes. Slowly, and only the border — a missing service is unfinished, not
+          broken, and an alarm-coloured flash would say the wrong thing about a project that is
+          simply not done yet.
+        */
+        @keyframes notch-breathe { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
+        .notch-ghost { animation: notch-breathe 2.8s ease-in-out infinite; }
+
+        /*
+          Edges draw themselves in when a scan lands. The dash offset animates once, so a fresh
+          scan reads as "this was just derived" rather than as a picture that was always there.
+        */
+        @keyframes notch-draw { from { stroke-dashoffset: 240 } to { stroke-dashoffset: 0 } }
+        .react-flow__edge-path { stroke-dasharray: 240; animation: notch-draw 700ms ease-out forwards; }
+        .react-flow__edge.animated .react-flow__edge-path { stroke-dasharray: 5 4; animation: none; }
+
+        /*
+          And none of it if the machine asked for none. Not a toggle in a settings screen
+          nobody opens — the OS already knows, and honouring that is not optional.
+        */
+        @media (prefers-reduced-motion: reduce) {
+          .react-flow__node, .react-flow__edge, .notch-ghost, .react-flow__edge-path {
+            animation: none !important; transition: none !important;
+          }
+          .react-flow__edge-path { stroke-dasharray: none !important; }
+        }
       `}</style>
       <ReactFlow
-        nodes={nodes}
-        edges={edges}
+        nodes={shown}
+        edges={shownEdges}
         onNodesChange={onNodesChange}
+        onNodeClick={(_, n) => setFocus((cur) => (cur === n.id ? null : n.id))}
+        onPaneClick={() => setFocus(null)}
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
@@ -482,6 +580,26 @@ function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
       </div>
 
       {paletteOpen && <AddPalette existing={existing} onClose={() => setPaletteOpen(false)} onAdd={onAdd} />}
+
+      {/* What focus is currently hiding, and how to stop. Never a mode you can get stuck in. */}
+      {focus !== null && (
+        <div
+          onClick={() => setFocus(null)}
+          style={{
+            position: 'absolute', left: '50%', bottom: 18, transform: 'translateX(-50%)', zIndex: 14,
+            display: 'flex', alignItems: 'center', gap: 10, padding: '9px 15px', cursor: 'pointer',
+            background: T.panel, border: `1px solid ${T.primary}`, borderRadius: 999,
+            boxShadow: '0 10px 30px rgba(0,0,0,.55)', fontFamily: SANS,
+          }}
+        >
+          <span style={{ color: T.text, fontSize: 12.5 }}>
+            {neighbours === 0
+              ? <>Nothing in this project connects to <b>{focusName}</b></>
+              : <><b>{focusName}</b> — {neighbours} connected</>}
+          </span>
+          <span style={{ color: T.faint, fontFamily: T.mono, fontSize: 10 }}>SHOW ALL</span>
+        </div>
+      )}
 
       {/* Which project you are looking at, without stealing a header row from the canvas. */}
       <div style={{
