@@ -28,6 +28,7 @@ import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/sca
 import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
+import { AgentError, ask, available, brief } from './agents.js';
 import { LockManager } from './core/lock.js';
 import { getPool } from './db/pool.js';
 import { migrate } from './db/migrate.js';
@@ -562,6 +563,79 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           graph: graph === null ? null : { ...graph, nodes: layout(graph.nodes) },
           note: 'Zerops accepted the import. New services start in CREATING and take a moment to become ACTIVE -- refresh to watch them settle.',
         });
+      }
+
+      /** Which coding agents are installed on this machine. */
+      case '/api/agents': {
+        return sendJson(res, 200, { agents: available() });
+      }
+
+      /**
+       * Ask one of them about this account's infrastructure.
+       *
+       * The agent is spawned locally and handed the live state — services, gaps, and the file
+       * evidence behind each gap — so its answer is grounded in the same facts the UI shows
+       * rather than in what a model assumes a repo like this usually needs.
+       *
+       * READ-ONLY BY CONSTRUCTION. Nothing here can provision; that stays behind the preview a
+       * human confirms. The exchange is written to the same append-only log as everything
+       * else, so "what did the agent tell me last Tuesday" has an answer.
+       */
+      case '/api/chat': {
+        if (req.method !== 'POST') {
+          return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST a question.' });
+        }
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { agent?: unknown; prompt?: unknown; projectId?: unknown; dir?: unknown };
+        const agent = typeof body.agent === 'string' ? body.agent : '';
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+        const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+        const dir = typeof body.dir === 'string' ? body.dir : '';
+        if (agent === '' || prompt === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'An agent and a question are required.' });
+        }
+
+        const project = (await c.projects()).find((p) => p.id === projectId);
+        if (project === undefined) {
+          return sendJson(res, 404, { error: 'no_such_project', message: 'Pick a project first.' });
+        }
+        const services = await c.services(projectId);
+        const graph = buildGraph(project, services);
+
+        const files = dir !== '' && existsSync(dir) ? await readRepo(dir) : [];
+        const required = scanRepo(files);
+        const drift = computeDrift(required, graph.nodes);
+
+        const context = brief({
+          projectName: project.name,
+          projectStatus: project.status,
+          services: graph.nodes.map((n) => ({ name: n.name, type: n.typeName, status: n.status })),
+          missing: drift.items.filter((i) => i.status === 'missing').map((i) => ({
+            type: i.type,
+            why: i.summary,
+            evidence: (i.required?.evidence ?? []).map((e) => `${e.found} in ${e.path}`),
+          })),
+          satisfied: drift.items.filter((i) => i.status === 'satisfied').map((i) => i.type),
+          dir,
+          scanned: files.map((f) => f.path),
+        });
+
+        try {
+          const r = await ask(agent, `${context}\nQUESTION: ${prompt}\n`, dir);
+          await record({
+            kind: 'agent_answered',
+            scope: projectId,
+            actor: agent,
+            payload: { prompt, agent: r.agent, ms: r.ms, chars: r.reply.length },
+          });
+          return sendJson(res, 200, r);
+        } catch (err) {
+          if (AgentError.is(err)) {
+            return sendJson(res, 502, { error: 'agent_failed', message: err.message, detail: err.detail });
+          }
+          throw err;
+        }
       }
 
       /** The persisted history. This is the half a live view cannot give you. */

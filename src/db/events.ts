@@ -35,6 +35,7 @@ export const EVENT_KINDS = [
   'provision_failed',
   'provision_blocked',
   'yaml_exported',
+  'agent_answered',
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

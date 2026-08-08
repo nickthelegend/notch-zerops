@@ -11,3 +11,7 @@ research/recipes/
 # Expo web export (built artifact, like web/)
 web-app/
 app/.expo/
+
+# Recording artifacts (large; the video is delivered as a file, not committed)
+scripts/video/out/
+scripts/video/audio/

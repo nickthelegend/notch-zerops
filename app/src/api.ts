@@ -77,6 +77,7 @@ export interface BrainEvent {
   payload: Record<string, unknown>;
 }
 
+export interface AgentInfo { id: string; label: string; path: string }
 export interface Session { email: string; projectCount: number; tokenHint: string }
 export interface Project { id: string; name: string; status: string }
 
@@ -123,6 +124,9 @@ export const api = {
   provision: (projectId: string, types: string[], ha: boolean, dir: string) =>
     call<{ created: Array<{ hostname: string }>; graph: Graph | null; note: string }>('/api/provision', json({ projectId, types, ha, dir })),
   history: (projectId: string) => call<{ events: BrainEvent[]; byKind: Array<{ kind: string; count: number }> }>(`/api/history?projectId=${encodeURIComponent(projectId)}`),
+  agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
+  chat: (agent: string, prompt: string, projectId: string, dir: string) =>
+    call<{ agent: string; reply: string; ms: number }>('/api/chat', json({ agent, prompt, projectId, dir })),
   /*
    * ABSOLUTE, always.
    *

@@ -10,7 +10,8 @@ import { Linking, ScrollView, Text, TextInput, View } from 'react-native';
 
 import { T, radii, spacing } from './theme';
 import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented, ago, field } from './components';
-import { ArchCanvas, type Ghost } from './arch';
+import { ArchCanvas, type Board, type Ghost } from './arch';
+import { ChatPanel } from './chat';
 import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
 import { api, type BrainEvent, type DriftResp, type Graph, type Plan, type Project, type Session } from './api';
 
@@ -90,6 +91,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [notice, setNotice] = useState<string | null>(null);
   const [events, setEvents] = useState<BrainEvent[] | null>(null);
   const [newName, setNewName] = useState<string | null>(null);
+  const [chatOpen, setChatOpen] = useState(true);
 
   /** In-flight guard in a ref: `setBusy(true)` has not landed when a second tap arrives. */
   const inFlight = useRef(false);
@@ -180,6 +182,17 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const counts = drift?.drift.counts;
   const current = projects?.find((p) => p.id === projectId);
 
+  const board: Board | null = graph === null ? null : {
+    graph,
+    ghosts,
+    repo: drift === null ? null : {
+      dir: drift.dir,
+      scanned: drift.scanned,
+      satisfied: counts?.['satisfied'] ?? 0,
+      missing: counts?.['missing'] ?? 0,
+    },
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
       {/* ---- bar ---- */}
@@ -190,6 +203,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
             {session.email} · {session.tokenHint}
           </Text>
           <View style={{ flex: 1 }} />
+          <Btn small label={chatOpen ? 'Hide agents' : 'Ask an agent'} onPress={() => setChatOpen(!chatOpen)} />
           <Btn small label={newName === null ? 'New project' : 'Cancel'} onPress={() => setNewName(newName === null ? '' : null)} />
           <Btn small label="Disconnect" onPress={() => { void api.disconnect().catch(() => {}); onDisconnect(); }} />
         </View>
@@ -331,6 +345,10 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
         </ScrollView>
       )}
 
+      {/* The board and the agents, side by side: you ask about what you are looking at. */}
+      <View style={{ flex: 1, flexDirection: 'row', minHeight: 0 }}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+
       {/* ---- tabs ---- */}
       <Segmented<Tab>
         value={tab}
@@ -344,9 +362,9 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       />
 
       {tab === 'arch' && (
-        graph === null
+        board === null
           ? <Empty text={error === null ? 'Loading your architecture…' : 'Could not read this project.'} />
-          : <ArchCanvas graph={graph} ghosts={ghosts} />
+          : <ArchCanvas board={board} />
       )}
 
       {tab === 'drift' && (
@@ -439,6 +457,15 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
           ))}
         </ScrollView>
       )}
+
+      </View>
+
+      {chatOpen && (
+        <View style={{ width: 400 }}>
+          <ChatPanel projectId={projectId} dir={dir.trim()} />
+        </View>
+      )}
+      </View>
     </View>
   );
 }
