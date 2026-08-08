@@ -254,7 +254,12 @@ export function Empty(props: { text: string }) {
  * smaller as it got better, which is usually the sign the shape was wrong before.
  */
 export function Segmented<K extends string>(props: {
-  options: ReadonlyArray<{ key: K; label: string }>;
+  options: ReadonlyArray<{
+    key: K;
+    label: string;
+    /** Something on this tab needs looking at now. Draws a dot; never steals the selection. */
+    alert?: boolean;
+  }>;
   value: K;
   onChange: (k: K) => void;
   accent?: string;
@@ -293,9 +298,15 @@ export function Segmented<K extends string>(props: {
               borderColor: on ? (props.accent ?? T.line2) : T.line,
             }}
           >
-            <Text style={{ color: on ? T.text : T.dim, fontSize: 12.5, fontWeight: "600" }}>
-              {o.label}
-            </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Text style={{ color: on ? T.text : T.dim, fontSize: 12.5, fontWeight: "600" }}>
+                {o.label}
+              </Text>
+              {/* A dot, not a colour swap: the tab still reads as a tab when it is unselected. */}
+              {o.alert === true && (
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: T.err }} />
+              )}
+            </View>
           </TouchableOpacity>
         );
       })}

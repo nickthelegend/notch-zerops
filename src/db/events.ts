@@ -40,6 +40,7 @@ export const EVENT_KINDS = [
   'deploy_started',
   'deploy_succeeded',
   'deploy_failed',
+  'hygiene_swept',
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

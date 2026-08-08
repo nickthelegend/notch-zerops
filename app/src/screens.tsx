@@ -13,7 +13,7 @@ import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented,
 import { ArchCanvas, type Board, type Ghost } from './arch';
 import { ChatPanel } from './chat';
 import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
-import { api, type BrainEvent, type Comparison, type DriftResp, type Graph, type Plan, type Project, type Session } from './api';
+import { api, type BrainEvent, type Comparison, type DriftResp, type Graph, type Hygiene, type Plan, type Project, type Session } from './api';
 
 /* ------------------------------------------------------------------ gate */
 
@@ -74,7 +74,7 @@ export function TokenScreen({ onConnected }: { onConnected: (s: Session) => void
 
 /* ------------------------------------------------------------------ main */
 
-type Tab = 'arch' | 'drift' | 'envs' | 'time';
+type Tab = 'arch' | 'drift' | 'secrets' | 'envs' | 'time';
 
 export function ProjectScreen({ session, onDisconnect }: { session: Session; onDisconnect: () => void }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -89,6 +89,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [ha, setHa] = useState(false);
   /** Services placed on the board by hand, folded into the same provision plan. */
   const [added, setAdded] = useState<string[]>([]);
+  const [hygiene, setHygiene] = useState<Hygiene | null>(null);
   const [created, setCreated] = useState<string | null>(null);
   /** A one-off confirmation with its own label — “CREATED” is wrong for three of the four. */
   const [notice, setNotice] = useState<{ label: string; text: string } | null>(null);
@@ -188,6 +189,14 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
     try {
       const d = await api.drift(projectId, dir.trim());
       setDrift(d); setGraph(d.graph);
+      /*
+       * Sweep for committed credentials in the same gesture.
+       *
+       * Not a separate button: nobody clicks "check my secrets" — they find out from someone
+       * else. It rides along with the scan they were going to run anyway, and it never blocks
+       * the scan result, because a hygiene failure must not cost you your drift report.
+       */
+      api.hygiene(dir.trim()).then(setHygiene).catch(() => setHygiene(null));
       setEvents((await api.history(projectId)).events);
     } catch (e) { setError((e as Error).message); }
   });
@@ -497,6 +506,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
         options={[
           { key: 'arch', label: 'Architecture' },
           { key: 'drift', label: counts === undefined ? 'Drift' : `Drift (${(counts['missing'] ?? 0) + (drift?.config?.missing.length ?? 0)})` },
+          { key: 'secrets', label: hygiene === null ? 'Secrets' : `Secrets (${hygiene.findings.length})`, alert: (hygiene?.findings.length ?? 0) > 0 },
           { key: 'envs', label: comparison === null ? 'Environments' : `Environments (${comparison.differences.length})` },
           { key: 'time', label: events === null ? 'Timeline' : `Timeline (${events.length})` },
         ]}
@@ -604,6 +614,79 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
               })}
 
               {(drift?.drift.notes ?? []).map((n) => <Callout key={n} label="NOTE" text={n} tint={T.dim} />)}
+            </>
+          )}
+        </ScrollView>
+      )}
+
+      {/*
+        WHAT GIT IS ALREADY CARRYING.
+
+        The one screen here that is about the repository alone — no Zerops call, no project.
+        It earns its tab because it answers a question nobody thinks to ask until it is far too
+        late, and because the answer is usually "you are fine", which is worth seeing stated.
+      */}
+      {tab === 'secrets' && (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          {hygiene === null ? (
+            <Empty text="Scan a repo and Notch sweeps it for credentials git is already tracking." />
+          ) : hygiene.tracked === null ? (
+            <Callout
+              label="COULD NOT TELL"
+              tint={T.warn}
+              text={hygiene.notes.join(' ')}
+            />
+          ) : (
+            <>
+              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                <MetricCard label="TRACKED BY GIT" value={String(hygiene.tracked)} />
+                <MetricCard label="READ" value={String(hygiene.scanned)} />
+                <MetricCard
+                  label="EXPOSED"
+                  value={String(hygiene.findings.length)}
+                  accent={hygiene.findings.length > 0}
+                />
+              </View>
+
+              {hygiene.findings.length === 0 ? (
+                <Callout
+                  label="CLEAN"
+                  tint={T.ok}
+                  text={`Read ${hygiene.scanned} of the ${hygiene.tracked} files git is tracking and found no credentials in any of them. This checks committed files only — a .env that git ignores is exactly where it should be.`}
+                />
+              ) : (
+                <>
+                  <Callout
+                    label={hygiene.findings.length === 1 ? '1 CREDENTIAL IS IN YOUR REPOSITORY' : `${hygiene.findings.length} CREDENTIALS ARE IN YOUR REPOSITORY`}
+                    tint={T.err}
+                    text="These are in files git tracks, so they are in your history. Deleting the line does not remove them — rotate each one at its issuer."
+                  />
+                  {hygiene.findings.map((f) => (
+                    <Panel key={`${f.path}:${f.line}:${f.rule}`}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Badge
+                          text={f.severity.toUpperCase()}
+                          tint={f.severity === 'critical' ? T.err : f.severity === 'high' ? T.warn : T.dim}
+                        />
+                        <Text style={{ color: T.text, fontSize: 13.5, fontWeight: '700' }}>{f.rule}</Text>
+                      </View>
+                      <Text selectable style={{ color: T.thread, fontFamily: T.mono, fontSize: 11.5, marginTop: 7 }}>
+                        {f.path}:{f.line}{f.key === null ? '' : `  ·  ${f.key}`}
+                      </Text>
+                      <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 18, marginTop: 6 }}>
+                        {f.advice}
+                      </Text>
+                    </Panel>
+                  ))}
+                </>
+              )}
+
+              {hygiene.notes.map((n) => <Callout key={n} label="NOTE" text={n} tint={T.warn} />)}
+
+              <Text style={{ color: T.faint, fontSize: 11.5, lineHeight: 17 }}>
+                Notch never reads a credential back to you. A finding is a file, a line and a
+                kind — enough to fix it, and nothing that would put the secret in a screenshot.
+              </Text>
             </>
           )}
         </ScrollView>

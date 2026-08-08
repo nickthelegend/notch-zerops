@@ -123,6 +123,30 @@ export interface BrainEvent {
   payload: Record<string, unknown>;
 }
 
+/**
+ * A credential git is already carrying.
+ *
+ * There is deliberately no field on this type that could hold the secret itself — the daemon
+ * has none to send. A finding is a location and a kind, which is everything you need to act
+ * and nothing you would regret having on screen during a demo.
+ */
+export interface Finding {
+  path: string;
+  line: number;
+  rule: string;
+  advice: string;
+  severity: 'critical' | 'high' | 'medium';
+  key: string | null;
+}
+
+export interface Hygiene {
+  /** Null when the directory is not a git repository — "could not tell", not "clean". */
+  tracked: number | null;
+  scanned: number;
+  findings: Finding[];
+  notes: string[];
+}
+
 export interface AgentInfo { id: string; label: string; path: string }
 export interface Session { email: string; projectCount: number; tokenHint: string }
 export interface Project { id: string; name: string; status: string }
@@ -180,6 +204,8 @@ export const api = {
       lines: string[]; total: number; done: boolean; ok: boolean | null;
       url: string | null; note: string; health: { status: number; ms: number } | null;
     }>(`/api/deploy/status?id=${encodeURIComponent(id)}&from=${from}`),
+  /** Local, and deliberately not gated on a Zerops session — see the route's own note. */
+  hygiene: (dir: string) => call<Hygiene>(`/api/hygiene?dir=${encodeURIComponent(dir)}`),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
   propose: (agent: string, projectId: string, dir: string, ha: boolean) =>
     call<{

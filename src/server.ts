@@ -28,6 +28,7 @@ import { compareConfig } from './zerops/config.js';
 import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
 import { deriveWiring } from './zerops/wiring.js';
 import { SCAN_GLOBS, findEnvNames, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
+import { sweep } from './repo/secrets.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, wiringSnippet, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
@@ -535,6 +536,41 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       }
 
       /** The whole point: repo requirements vs deployed reality. */
+      /*
+       * What git is already carrying.
+       *
+       * Deliberately NOT behind `requireClient`: this reads a directory on this machine and
+       * talks to nobody. Gating a local security check on a cloud credential would mean the
+       * one moment you most need it — before you have connected anything — is the one moment
+       * it refuses to run.
+       */
+      case '/api/hygiene': {
+        const dir = url.searchParams.get('dir');
+        if (dir === null || dir === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'dir is required' });
+        }
+        if (!existsSync(dir)) {
+          return sendJson(res, 400, { error: 'no_such_dir', message: `${dir} does not exist on this machine` });
+        }
+        const report = await sweep(dir);
+        /*
+         * Recorded by COUNT and RULE, never by finding. The event log is a database row that
+         * outlives the session; putting a file path and a line number in it would build a map
+         * to the credential that survives the rotation.
+         */
+        await record({
+          kind: 'hygiene_swept', actor: 'notch',
+          payload: {
+            dir,
+            tracked: report.tracked,
+            scanned: report.scanned,
+            findings: report.findings.length,
+            rules: [...new Set(report.findings.map((f) => f.rule))],
+          },
+        }).catch(() => null);
+        return sendJson(res, 200, report);
+      }
+
       case '/api/drift': {
         const c = requireClient(res);
         if (c === null) return;
