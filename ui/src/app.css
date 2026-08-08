@@ -85,3 +85,44 @@ aside h3:first-child { margin-top: 0; }
 .status { margin-top: 8px; font-size: 9.5px; font-family: var(--mono); color: var(--dim); letter-spacing: .05em; }
 .status.s-active { color: var(--accent); }
 .status.s-ready-to-deploy { color: var(--warn); }
+
+/* ---------- provisioning ---------- */
+.prov { margin-left: 14px; display: inline-flex; gap: 10px; align-items: center; }
+.prov label { font-size: 12px; color: var(--dim); display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.banner.ok { background: #f0faf7; color: #0b6b52; border-bottom-color: #a7d9c9; }
+/* The write is gated behind seeing the exact file. Styled as a decision, not a notice. */
+.banner.plan { background: #fffdf6; border-bottom-color: #e7d9a8; }
+.plan-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.plan-head span { display: flex; gap: 8px; }
+.banner.plan pre { margin-top: 9px; background: #fff; border: 1px solid var(--line); border-radius: 8px;
+                   padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; overflow-x: auto; }
+.banner.plan .warn { margin-top: 8px; color: #8a6d1f; font-size: 12.5px; }
+
+/* ---------- narrow screens ---------- */
+/*
+ * The two-column grid hardcodes a 380px sidebar, which overflows any phone by design --
+ * measured at 380px wide, `.app` was 5px past the viewport and the body scrolled sideways.
+ * Below 900px the sidebar goes under the canvas instead of beside it, so the diagram keeps
+ * the full width and nothing scrolls horizontally.
+ */
+@media (max-width: 900px) {
+  /*
+   * `grid-template-rows` is deliberately NOT set here. Banners are conditional -- the drift
+   * summary, the plan preview, the success note and the error all come and go -- so any fixed
+   * row list puts the canvas in whatever row happens to be left, and it collapsed to 54px the
+   * moment a banner was absent. An explicit min-height on the canvas itself does not care how
+   * many siblings exist.
+   */
+  .app { grid-template-columns: 1fr; grid-template-rows: none; height: auto; min-height: 100vh; }
+  .canvas { min-height: 60vh; }
+  aside { border-left: 0; border-top: 1px solid var(--line); }
+  .dir { width: 100%; }
+  .controls { width: 100%; }
+  .controls select, .controls button { flex: 1 1 auto; }
+  header { align-items: flex-start; }
+}
+@media (max-width: 520px) {
+  .gate-card { width: 100%; padding: 24px; }
+  .plan-head { flex-direction: column; align-items: flex-start; }
+}

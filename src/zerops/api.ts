@@ -140,7 +140,7 @@ export class ZeropsClient {
     return redactToken(this.token);
   }
 
-  private async call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  private async call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
     const res = await this.fetchImpl(`${this.base}${path}`, {
       method,
       headers: {
@@ -169,16 +169,21 @@ export class ZeropsClient {
   }
 
   /**
-   * The `search` array shape, which is the whole trick. Callers pass terms; `clientId` is
-   * injected automatically because forgetting it is the single most common way to get a 400
-   * that names the wrong problem.
+   * The `search` array shape, which is the whole trick.
+   *
+   * `clientId` is injected by default, because forgetting it on a client-scoped index is the
+   * most common way to get a 400 that names the wrong problem. But it is NOT universal, and
+   * injecting it blindly is its own bug: `/service-stack-type/search` is a global catalogue
+   * with no client column at all, and adding the term there fails with
+   * "unknown search column 'clientId' for index 'servicestacktype'". Hence the opt-out.
    */
-  private async search<T>(path: string, terms: SearchTerm[]): Promise<T[]> {
-    const clientId = await this.clientId();
-    const withClient: SearchTerm[] = terms.some((t) => t.name === 'clientId')
-      ? terms
-      : [{ name: 'clientId', operator: 'eq', value: clientId }, ...terms];
-    const res = await this.call<{ items?: T[] }>('POST', path, { search: withClient });
+  private async search<T>(path: string, terms: SearchTerm[], opts: { clientScoped?: boolean } = {}): Promise<T[]> {
+    const clientScoped = opts.clientScoped ?? true;
+    let finalTerms = terms;
+    if (clientScoped && !terms.some((t) => t.name === 'clientId')) {
+      finalTerms = [{ name: 'clientId', operator: 'eq', value: await this.clientId() }, ...terms];
+    }
+    const res = await this.call<{ items?: T[] }>('POST', path, { search: finalTerms });
     return res.items ?? [];
   }
 
@@ -201,6 +206,38 @@ export class ZeropsClient {
   async projects(): Promise<ZProject[]> {
     const raw = await this.search<unknown>('/project/search', []);
     return raw.map((r) => ZProjectSchema.parse(r));
+  }
+
+  /** The account's service catalogue, with the real internal version names. */
+  async serviceTypes(): Promise<Array<{ typeId: string; name: string; versions: string[] }>> {
+    // Global catalogue: not scoped to a client, and saying so is required rather than tidy.
+    const raw = await this.search<Record<string, unknown>>('/service-stack-type/search', [], { clientScoped: false });
+    return raw.map((t) => ({
+      typeId: String(t['id'] ?? ''),
+      name: String(t['name'] ?? ''),
+      versions: Array.isArray(t['serviceStackTypeVersionList'])
+        ? (t['serviceStackTypeVersionList'] as Array<{ name?: unknown }>).map((v) => String(v.name ?? '')).filter((v) => v !== '')
+        : [],
+    })).filter((t) => t.typeId !== '');
+  }
+
+  /**
+   * Add services to an EXISTING project, via an import file.
+   *
+   * `POST /project/{id}/service-stack/import`, found by probing: the documented path is the
+   * `zcli project service-import` command and the REST route is not in the public reference.
+   * `PUT /project/import` is the neighbouring route that CREATES a project and answers
+   * "Project not found" no matter what you send it, which is a very effective decoy.
+   *
+   * This WRITES. It creates real services that consume real account resources.
+   */
+  async importServices(projectId: string, yaml: string): Promise<unknown> {
+    return this.call('POST', `/project/${encodeURIComponent(projectId)}/service-stack/import`, { yaml });
+  }
+
+  /** Delete one service. Used to clean up after a provisioning test. */
+  async deleteService(serviceId: string): Promise<unknown> {
+    return this.call('DELETE', `/service-stack/${encodeURIComponent(serviceId)}`);
   }
 
   async services(projectId: string): Promise<ZService[]> {

@@ -6,7 +6,7 @@
  * never render the same way, so a failed call paints an error panel rather than an empty
  * canvas.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background, BackgroundVariant, Controls, ReactFlow, type Edge, type Node,
 } from '@xyflow/react';
@@ -52,6 +52,27 @@ export default function App() {
   const [dir, setDir] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [plan, setPlan] = useState<{ services: { hostname: string; type: string; mode: string }[]; yaml: string; unresolved: string[] } | null>(null);
+  const [ha, setHa] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
+
+  /**
+   * In-flight guard, in a ref rather than in state.
+   *
+   * `setBusy(true)` does not take effect until React re-renders, so two clicks landing in the
+   * same tick both pass a state-based check. Found by double-clicking "Confirm and create":
+   * the first write succeeded and the second fired anyway, returning 502 because the
+   * hostnames now existed -- while the UI showed success. Nothing was duplicated only
+   * because Zerops rejected it, which is luck, not design. A ref updates synchronously, so
+   * the second click cannot get past it.
+   */
+  const inFlight = useRef(false);
+  const guard = async (fn: () => Promise<void>): Promise<void> => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try { await fn(); } finally { inFlight.current = false; setBusy(false); }
+  };
 
   useEffect(() => {
     void api<{ connected: boolean; email?: string; projectCount?: number; tokenHint?: string }>('/api/session/status')
@@ -67,35 +88,75 @@ export default function App() {
   }, [session, projectId]);
 
   const loadGraph = useCallback(async (pid: string) => {
-    if (pid === '') return;
-    setBusy(true); setError(null);
+    if (pid === '' || inFlight.current) return;
+    inFlight.current = true; setBusy(true); setError(null);
     try { setGraph(await api<Graph>(`/api/graph?projectId=${encodeURIComponent(pid)}`)); }
     catch (e) { setError((e as Error).message); setGraph(null); }
-    finally { setBusy(false); }
+    finally { inFlight.current = false; setBusy(false); }
   }, []);
 
   useEffect(() => { void loadGraph(projectId); }, [projectId, loadGraph]);
 
-  const connect = async () => {
-    setBusy(true); setError(null);
+  const connect = async () => guard(async () => {
+    setError(null);
     try {
       const s = await api<{ email: string; projectCount: number; tokenHint: string }>('/api/session', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
       });
       setSession(s); setToken('');
     } catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
-  };
+  });
 
-  const scan = async () => {
+  const scan = async () => guard(async () => {
     if (dir.trim() === '' || projectId === '') return;
-    setBusy(true); setError(null);
+    setError(null);
     try {
       const d = await api<DriftResp>(`/api/drift?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir.trim())}`);
       setDrift(d); setGraph(d.graph);
     } catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
-  };
+  });
+
+  const missingTypes = useMemo(
+    () => (drift?.drift.provisionable ?? []).map((i) => i.type),
+    [drift],
+  );
+
+  /**
+   * Ask what WOULD be created, before anything is.
+   *
+   * A button that provisions real infrastructure should never be the first time you learn
+   * what it provisions, so the exact import file is shown first. The plan and the write share
+   * one server-side builder, so the preview cannot drift from what actually gets sent.
+   */
+  const preview = async () => guard(async () => {
+    setError(null); setCreated(null);
+    try {
+      setPlan(await api('/api/provision/plan', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId, types: missingTypes, ha }),
+      }));
+    } catch (e) { setError((e as Error).message); }
+  });
+
+  const provision = async () => guard(async () => {
+    setError(null);
+    try {
+      const r = await api<{ created: { hostname: string }[]; graph: Graph | null; note: string }>('/api/provision', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId, types: missingTypes, ha }),
+      });
+      setCreated(`Created ${r.created.map((c) => c.hostname).join(', ')}. ${r.note}`);
+      setPlan(null);
+      if (r.graph !== null) setGraph(r.graph);
+      // Re-scan so the ghosts disappear for the right reason -- because the services now
+      // exist, re-read from the platform, not because the UI hid them optimistically.
+      // Re-read via the same endpoint rather than the guard, since we already hold it.
+      if (dir.trim() !== '') {
+        const d = await api<DriftResp>(`/api/drift?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir.trim())}`);
+        setDrift(d); setGraph(d.graph);
+      }
+    } catch (e) { setError((e as Error).message); }
+  });
 
   /**
    * Missing services become GHOST nodes on the same canvas.
@@ -177,6 +238,38 @@ export default function App() {
         <div className="banner drift">
           <b>{counts['satisfied']} satisfied</b> · <b className="miss">{counts['missing']} missing</b> ·{' '}
           {counts['unreferenced']} unreferenced &nbsp;—&nbsp; scanned {drift?.scanned.join(', ') || 'nothing'} in {drift?.dir}
+          {missingTypes.length > 0 && (
+            <span className="prov">
+              <label title="Meilisearch and some others only ship single-container; HA is skipped where the platform has no HA version.">
+                <input type="checkbox" checked={ha} onChange={(e) => setHa(e.target.checked)} /> HA where available
+              </label>
+              <button className="primary" disabled={busy} onClick={() => void preview()}>
+                Provision {missingTypes.length} missing…
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+
+      {created !== null && <div className="banner ok">{created}</div>}
+
+      {plan !== null && (
+        <div className="banner plan">
+          <div className="plan-head">
+            <b>This will create {plan.services.length} real service(s) on your Zerops account.</b>
+            <span>
+              <button className="primary" disabled={busy || plan.services.length === 0} onClick={() => void provision()}>
+                {busy ? 'creating…' : 'Confirm and create'}
+              </button>
+              <button disabled={busy} onClick={() => setPlan(null)}>Cancel</button>
+            </span>
+          </div>
+          <pre>{plan.yaml || '(nothing resolvable)'}</pre>
+          {plan.unresolved.length > 0 && (
+            <div className="warn">
+              No Zerops service type matches: {plan.unresolved.join(', ')}. These are skipped rather than guessed at.
+            </div>
+          )}
         </div>
       )}
 

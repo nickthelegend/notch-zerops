@@ -24,6 +24,8 @@ import { ZeropsApiError, ZeropsClient, redactToken } from './zerops/api.js';
 import { buildGraph, layout } from './zerops/graph.js';
 import { computeDrift } from './zerops/drift.js';
 import { SCAN_GLOBS, scanRepo, type RepoFile } from './repo/scan.js';
+import { ServiceCatalog, buildImportYaml, safeHostname } from './zerops/catalog.js';
+import type { ServiceType } from './repo/scan.js';
 
 // fileURLToPath, not .pathname: a repo path containing a space percent-encodes and then
 // nothing resolves. Bitten by this twice on a sibling project.
@@ -57,6 +59,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function sendError(res: ServerResponse, err: unknown): void {
+  if (BadRequest.is(err)) {
+    return sendJson(res, 400, { error: 'bad_request', message: err.message });
+  }
   if (ZeropsApiError.is(err)) {
     // 502 rather than passing Zerops' status through: from the browser's point of view the
     // upstream failed, and a 401 here would look like OUR auth rejected the user.
@@ -78,15 +83,31 @@ function requireClient(res: ServerResponse): ZeropsClient | null {
   return client;
 }
 
+/** A malformed request body is the CLIENT's mistake, so it must not surface as a 500. */
+class BadRequest extends Error {
+  constructor(message: string) { super(message); this.name = 'BadRequest'; }
+  static is(e: unknown): e is BadRequest { return e instanceof Error && e.name === 'BadRequest'; }
+}
+
+const MAX_BODY_BYTES = 256 * 1024;
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let size = 0;
+  for await (const c of req) {
+    const buf = c as Buffer;
+    size += buf.byteLength;
+    // Bounded: without a cap, an unbounded body is a trivial way to exhaust memory, and
+    // nothing this API accepts is anywhere near 256KB.
+    if (size > MAX_BODY_BYTES) throw new BadRequest('request body too large');
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString('utf8');
   if (raw === '') return {};
   try {
     return JSON.parse(raw);
   } catch {
-    throw new Error('request body was not JSON');
+    throw new BadRequest('Request body was not valid JSON.');
   }
 }
 
@@ -104,6 +125,53 @@ async function readRepo(dir: string): Promise<RepoFile[]> {
     }
   }
   return out;
+}
+
+interface Plan {
+  projectId: string;
+  services: Array<{ hostname: string; type: string; mode: 'HA' | 'NON_HA' }>;
+  /** Requested types the platform has no equivalent for. Reported, never silently dropped. */
+  unresolved: string[];
+  yaml: string;
+}
+
+/**
+ * Turn requested service types into the exact import file.
+ *
+ * Shared by the plan and the write, so the preview cannot drift from what actually gets
+ * sent -- a preview that shows something other than what happens is worse than no preview.
+ */
+async function buildPlan(
+  c: ZeropsClient,
+  body: { projectId?: unknown; types?: unknown; ha?: unknown },
+): Promise<Plan | { error: string; message: string }> {
+  const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+  const types = Array.isArray(body.types) ? body.types.filter((t): t is string => typeof t === 'string') : [];
+  const ha = body.ha === true;
+  if (projectId === '' || types.length === 0) {
+    return { error: 'missing_params', message: 'projectId and a non-empty types[] are required.' };
+  }
+
+  const project = (await c.projects()).find((p) => p.id === projectId);
+  if (project === undefined) return { error: 'no_such_project', message: `No project ${projectId} on this account.` };
+
+  const catalog = new ServiceCatalog(c);
+  const existing = (await c.services(projectId)).map((s) => s.name);
+  const taken = [...existing];
+  const services: Plan['services'] = [];
+  const unresolved: string[] = [];
+
+  for (const t of types) {
+    const spec = await catalog.resolve(t as ServiceType, ha);
+    if (spec === null) { unresolved.push(t); continue; }
+    // Hostnames must be unique in a project, <=25 chars, [a-z0-9] only. Collisions are
+    // resolved against services that already exist AND ones earlier in this same plan.
+    const hostname = safeHostname(t, taken);
+    taken.push(hostname);
+    services.push({ hostname, ...spec });
+  }
+
+  return { projectId, services, unresolved, yaml: buildImportYaml(services) };
 }
 
 async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> {
@@ -199,6 +267,48 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           ...(files.length === 0
             ? { note: `No recognised manifests in ${dir}. That is not the same as "this repo needs nothing" -- it means there was nothing here to read.` }
             : {}),
+        });
+      }
+
+      /**
+       * What WOULD be provisioned. Read-only, and it exists so nothing writes to an account
+       * without the exact import file having been shown first. A button that creates real
+       * infrastructure should never be the first time you learn what it creates.
+       */
+      case '/api/provision/plan': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { projectId?: unknown; types?: unknown; ha?: unknown };
+        const plan = await buildPlan(c, body);
+        if ('error' in plan) return sendJson(res, 400, plan);
+        return sendJson(res, 200, plan);
+      }
+
+      /** Creates real services that consume real account resources. POST, never GET. */
+      case '/api/provision': {
+        if (req.method !== 'POST') {
+          return sendJson(res, 405, { error: 'method_not_allowed', note: 'POST -- this creates real services on your Zerops account' });
+        }
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { projectId?: unknown; types?: unknown; ha?: unknown };
+        const plan = await buildPlan(c, body);
+        if ('error' in plan) return sendJson(res, 400, plan);
+        if (plan.services.length === 0) {
+          return sendJson(res, 400, { error: 'nothing_to_do', message: 'No resolvable services were requested.' });
+        }
+
+        await c.importServices(plan.projectId, plan.yaml);
+        // Re-read rather than assume: the import being accepted is not the same as the
+        // services existing, and the UI should redraw from what the platform now reports.
+        const project = (await c.projects()).find((x) => x.id === plan.projectId);
+        const graph = project === undefined ? null : buildGraph(project, await c.services(plan.projectId));
+        return sendJson(res, 200, {
+          created: plan.services,
+          yaml: plan.yaml,
+          unresolved: plan.unresolved,
+          graph: graph === null ? null : { ...graph, nodes: layout(graph.nodes) },
+          note: 'Zerops accepted the import. New services start in CREATING and take a moment to become ACTIVE -- refresh to watch them settle.',
         });
       }
 
