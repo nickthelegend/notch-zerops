@@ -13,7 +13,7 @@ import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented,
 import { ArchCanvas, type Board, type Ghost } from './arch';
 import { ChatPanel } from './chat';
 import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
-import { api, type BrainEvent, type DriftResp, type Graph, type Plan, type Project, type Session } from './api';
+import { api, type BrainEvent, type Comparison, type DriftResp, type Graph, type Plan, type Project, type Session } from './api';
 
 /* ------------------------------------------------------------------ gate */
 
@@ -74,7 +74,7 @@ export function TokenScreen({ onConnected }: { onConnected: (s: Session) => void
 
 /* ------------------------------------------------------------------ main */
 
-type Tab = 'arch' | 'drift' | 'time';
+type Tab = 'arch' | 'drift' | 'envs' | 'time';
 
 export function ProjectScreen({ session, onDisconnect }: { session: Session; onDisconnect: () => void }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -92,6 +92,8 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [events, setEvents] = useState<BrainEvent[] | null>(null);
   const [newName, setNewName] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
+  const [against, setAgainst] = useState('');
+  const [comparison, setComparison] = useState<Comparison | null>(null);
 
   /** In-flight guard in a ref: `setBusy(true)` has not landed when a second tap arrives. */
   const inFlight = useRef(false);
@@ -110,7 +112,16 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   /** Findings belong to the project they came from. A switch makes them wrong, not stale. */
   useEffect(() => {
     setDrift(null); setPlan(null); setCreated(null); setEvents(null); setError(null); setNotice(null);
+    setComparison(null); setAgainst('');
   }, [projectId]);
+
+  /** Compare this project against another one on the account. */
+  const compare = (otherId: string) => void guard(async () => {
+    setAgainst(otherId);
+    setError(null);
+    try { setComparison(await api.compare(projectId, otherId)); }
+    catch (e) { setError((e as Error).message); setComparison(null); }
+  });
 
   const loadGraph = useCallback(async (pid: string) => {
     if (pid === '') return;
@@ -356,7 +367,8 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
         accent={T.primary}
         options={[
           { key: 'arch', label: 'Architecture' },
-          { key: 'drift', label: counts === undefined ? 'Drift' : `Drift (${counts['missing'] ?? 0})` },
+          { key: 'drift', label: counts === undefined ? 'Drift' : `Drift (${(counts['missing'] ?? 0) + (drift?.config?.missing.length ?? 0)})` },
+          { key: 'envs', label: comparison === null ? 'Environments' : `Environments (${comparison.differences.length})` },
           { key: 'time', label: events === null ? 'Timeline' : `Timeline (${events.length})` },
         ]}
       />
@@ -385,6 +397,38 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
 
               {drift?.note !== undefined && <Callout label="NOTE" text={drift.note} tint={T.warn} />}
               {drift?.historyNote !== undefined && <Callout label="NOT RECORDED" text={drift.historyNote} tint={T.warn} />}
+
+              {/*
+                Config drift, above the service list on purpose.
+                A missing service fails loudly at deploy; a missing variable deploys clean and
+                kills the app on the first request that reads it. The quieter failure gets the
+                louder placement.
+              */}
+              {(drift?.config?.missing.length ?? 0) > 0 && (
+                <Panel tint={T.err}>
+                  <SectionLabel text="SET, BUT NOT HERE" />
+                  <View style={{ paddingHorizontal: spacing.md, paddingBottom: spacing.md, gap: 7 }}>
+                    <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 18 }}>
+                      The repo reads {drift?.config?.missing.length} variable(s) this project does
+                      not define. The deploy will succeed and the app will fail at runtime.
+                    </Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5 }}>
+                      {(drift?.config?.missing ?? []).map((k) => (
+                        <Text key={k} style={{
+                          color: T.err, fontFamily: T.mono, fontSize: 11,
+                          backgroundColor: '#2a1a1e', borderColor: '#4a2b32', borderWidth: 1,
+                          borderRadius: 5, paddingHorizontal: 7, paddingVertical: 3, overflow: 'hidden',
+                        }}>{k}</Text>
+                      ))}
+                    </View>
+                    {(drift?.config?.provided.length ?? 0) > 0 && (
+                      <Text style={{ color: T.faint, fontSize: 11.5, lineHeight: 17 }}>
+                        Not listed: {(drift?.config?.provided ?? []).map((p) => `${p.key} (${p.by} provides it)`).join(', ')}.
+                      </Text>
+                    )}
+                  </View>
+                </Panel>
+              )}
 
               {missing.length > 0 && (
                 <Panel>
@@ -431,6 +475,85 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
               })}
 
               {(drift?.drift.notes ?? []).map((n) => <Callout key={n} label="NOTE" text={n} tint={T.dim} />)}
+            </>
+          )}
+        </ScrollView>
+      )}
+
+      {tab === 'envs' && (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+          <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 19 }}>
+            Zerops shows one project at a time, which is exactly the view in which dev, stage and
+            production drift apart. Pick another project and hold them against each other.
+          </Text>
+
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+            {(projects ?? []).filter((p) => p.id !== projectId).map((p) => {
+              const on = p.id === against;
+              return (
+                <Text
+                  key={p.id}
+                  onPress={() => compare(p.id)}
+                  style={{
+                    color: on ? T.onBright : T.dim,
+                    backgroundColor: on ? T.bright : T.raised,
+                    borderColor: on ? T.bright : T.line, borderWidth: 1,
+                    borderRadius: radii.pill, paddingHorizontal: 12, paddingVertical: 6,
+                    fontSize: 12, fontWeight: on ? '700' : '500', overflow: 'hidden',
+                  }}
+                >
+                  vs {p.name}
+                </Text>
+              );
+            })}
+          </ScrollView>
+
+          {comparison === null ? (
+            <Empty text={(projects ?? []).length < 2
+              ? 'This account has only one project — there is nothing to compare it with yet.'
+              : 'Pick a project above.'} />
+          ) : (
+            <>
+              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                <MetricCard label="DIFFERENCES" value={String(comparison.differences.length)} accent={comparison.differences.length > 0} />
+                <MetricCard label="IDENTICAL" value={String(comparison.identical.length)} />
+              </View>
+
+              {comparison.differences.length === 0 ? (
+                <Callout label="MATCHED" tint={T.ok}
+                  text={`${comparison.a} and ${comparison.b} agree on every service, version, mode, route and variable name compared.`} />
+              ) : comparison.differences.map((d, i) => {
+                const tint = d.severity === 'high' ? T.err : d.severity === 'medium' ? T.warn : T.dim;
+                return (
+                  <Panel key={`${d.kind}-${d.subject}-${i}`}>
+                    <View style={{ padding: spacing.md, gap: 6 }}>
+                      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <Badge text={d.severity} tint={tint} />
+                        <Text style={{ color: T.text, fontWeight: '700', fontSize: 13.5 }}>{d.subject}</Text>
+                        <Badge text={d.kind.replace(/_/g, ' ')} />
+                      </View>
+
+                      {/* The two sides, side by side. This is the whole feature. */}
+                      <View style={{ flexDirection: 'row', gap: 10, marginTop: 2 }}>
+                        <View style={{ flex: 1, backgroundColor: T.raised, borderColor: T.line, borderWidth: 1, borderRadius: radii.input, padding: 9 }}>
+                          <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 9.5 }}>{comparison.a.toUpperCase()}</Text>
+                          <Text style={{ color: d.a === null ? T.faint : T.text, fontFamily: T.mono, fontSize: 12, marginTop: 3 }}>
+                            {d.a ?? '— absent'}
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1, backgroundColor: T.raised, borderColor: T.line, borderWidth: 1, borderRadius: radii.input, padding: 9 }}>
+                          <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 9.5 }}>{comparison.b.toUpperCase()}</Text>
+                          <Text style={{ color: d.b === null ? T.faint : T.text, fontFamily: T.mono, fontSize: 12, marginTop: 3 }}>
+                            {d.b ?? '— absent'}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text style={{ color: T.dim, fontSize: 12, lineHeight: 18 }}>{d.detail}</Text>
+                    </View>
+                  </Panel>
+                );
+              })}
             </>
           )}
         </ScrollView>

@@ -29,6 +29,12 @@ export interface ArchNode {
   typeId: string;
   /** Human label from the platform, e.g. "PostgreSQL". Falls back to the type id. */
   typeName: string;
+  /**
+   * The version actually running, e.g. `7.2`, taken from the platform's internal name
+   * (`valkey:single@7.2`, `alpine/nodejs@24`). `null` when the platform did not say — never
+   * guessed, because "which version is production on" is exactly the question this answers.
+   */
+  version: string | null;
   kind: NodeKind;
   status: string;
   /** True when the platform says so. Never inferred. */
@@ -124,6 +130,8 @@ export function toNode(s: ZService): ArchNode {
     name: s.name,
     typeId: s.serviceStackTypeId,
     typeName: info.serviceStackTypeName ?? s.serviceStackTypeId,
+    // `base:mode@version` or `os/base@version` — the part after `@` is the version.
+    version: (info.serviceStackTypeVersionName ?? '').split('@')[1] ?? null,
     kind: classify(s.serviceStackTypeId, info.serviceStackTypeCategory),
     status: s.status,
     // Read, never inferred. A single-mode service mid-deploy can show two containers.

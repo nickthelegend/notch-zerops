@@ -47,7 +47,31 @@ export interface DriftItem {
   deployed?: { name: string };
 }
 
+export interface ConfigDrift {
+  missing: string[];
+  present: string[];
+  provided: Array<{ key: string; by: string }>;
+}
+
+export interface Difference {
+  kind: 'only_in_a' | 'only_in_b' | 'version' | 'mode' | 'routing' | 'env_key';
+  subject: string;
+  a: string | null;
+  b: string | null;
+  severity: 'high' | 'medium' | 'low';
+  detail: string;
+}
+
+export interface Comparison {
+  a: string;
+  b: string;
+  differences: Difference[];
+  identical: string[];
+}
+
 export interface DriftResp {
+  /** Variables the repo reads that the project does not define. */
+  config?: ConfigDrift;
   dir: string;
   scanned: string[];
   drift: {
@@ -124,6 +148,8 @@ export const api = {
   provision: (projectId: string, types: string[], ha: boolean, dir: string) =>
     call<{ created: Array<{ hostname: string }>; graph: Graph | null; note: string }>('/api/provision', json({ projectId, types, ha, dir })),
   history: (projectId: string) => call<{ events: BrainEvent[]; byKind: Array<{ kind: string; count: number }> }>(`/api/history?projectId=${encodeURIComponent(projectId)}`),
+  compare: (a: string, b: string) =>
+    call<Comparison>(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
   chat: (agent: string, prompt: string, projectId: string, dir: string) =>
     call<{ agent: string; reply: string; ms: number }>('/api/chat', json({ agent, prompt, projectId, dir })),

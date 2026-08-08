@@ -14,7 +14,8 @@
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
     "dev": "tsx src/server.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "check": "tsx src/cli/check.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

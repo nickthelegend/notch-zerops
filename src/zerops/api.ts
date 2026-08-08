@@ -69,12 +69,30 @@ export const ZUserSchema = z.object({
 }).loose();
 export type ZUser = z.infer<typeof ZUserSchema>;
 
+/**
+ * A project environment variable, reduced to what we are willing to hold.
+ *
+ * `content` IS in the API response and is deliberately not in this schema. Zod strips what it
+ * does not describe, so the value is dropped at the boundary and cannot reach a log, the UI, a
+ * timeline payload, or an agent prompt by accident. Everything this app does with environment
+ * variables — comparing environments, spotting a key the repo needs and the project lacks —
+ * needs the NAME and nothing else.
+ */
+export const ZEnvSchema = z.object({
+  key: z.string(),
+  sensitive: z.boolean().optional(),
+  /** `SYSTEM` for the ones Zerops injects, otherwise user-set. */
+  type: z.string().optional(),
+});
+export type ZEnv = z.infer<typeof ZEnvSchema>;
+
 export const ZProjectSchema = z.object({
   id: z.string(),
   name: z.string(),
   status: z.string(),
   clientId: z.string().optional(),
   description: z.string().nullable().optional(),
+  envList: z.array(ZEnvSchema).default([]),
 }).loose();
 export type ZProject = z.infer<typeof ZProjectSchema>;
 
@@ -94,6 +112,7 @@ export const ZServiceSchema = z.object({
   serviceStackTypeId: z.string(),
   /** `single` | `HA` | null. Null while a service has never been deployed. */
   mode: z.string().nullable().optional(),
+  envList: z.array(ZEnvSchema).default([]),
   isSystem: z.boolean().optional(),
   ports: z.array(ZPortSchema).default([]),
   /** Ids of services this one is wired to. The edges of the architecture graph. */
@@ -103,6 +122,8 @@ export const ZServiceSchema = z.object({
   serviceStackTypeInfo: z.object({
     serviceStackTypeName: z.string().optional(),
     serviceStackTypeCategory: z.string().optional(),
+    /** The internal version string, e.g. `valkey:single@7.2` or `alpine/nodejs@24`. */
+    serviceStackTypeVersionName: z.string().optional(),
   }).loose().optional(),
   coreService: z.object({
     currentActiveContainerCount: z.number().nullable().optional(),

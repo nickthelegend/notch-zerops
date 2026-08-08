@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 import { ZeropsApiError, ZeropsClient, redactToken } from './zerops/api.js';
 import { buildGraph, layout } from './zerops/graph.js';
 import { computeDrift } from './zerops/drift.js';
+import { compareConfig } from './zerops/config.js';
+import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
 import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
@@ -460,8 +462,20 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             unreferenced: drift.counts.unreferenced,
           },
         });
+        /*
+         * Config drift rides along with the service drift, because they are the same question
+         * asked of two different layers and answering only the first is how an app gets
+         * deployed with every service it needs and no way to authenticate.
+         */
+        const config = compareConfig(
+          findSecretNames(files),
+          project.envList.map((e) => e.key),
+          [...graph.nodes.map((n) => n.name), ...graph.nodes.map((n) => n.typeName)],
+        );
+
         const history = logged.persisted ? await unresolvedDrift(projectId).catch(() => []) : [];
         return sendJson(res, 200, {
+          config,
           history,
           ...(logged.persisted ? {} : { historyNote: `This scan was not recorded: ${logged.reason}. The findings below are still real; only the history is missing.` }),
           dir,
@@ -563,6 +577,55 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           graph: graph === null ? null : { ...graph, nodes: layout(graph.nodes) },
           note: 'Zerops accepted the import. New services start in CREATING and take a moment to become ACTIVE -- refresh to watch them settle.',
         });
+      }
+
+      /**
+       * Hold two environments against each other.
+       *
+       * The view Zerops cannot give you, because Zerops shows one project at a time — and one
+       * project at a time is precisely the view in which dev, stage and prod drift apart. The
+       * comparison is pure and tested; this endpoint only fetches the two sides.
+       */
+      case '/api/compare': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const aId = url.searchParams.get('a');
+        const bId = url.searchParams.get('b');
+        if (aId === null || bId === null) {
+          return sendJson(res, 400, { error: 'missing_params', message: 'Two project ids are required: ?a=…&b=…' });
+        }
+        if (aId === bId) {
+          return sendJson(res, 400, { error: 'same_project', message: 'Pick two different projects.' });
+        }
+
+        const projects = await c.projects();
+        const snapshot = async (id: string): Promise<EnvSnapshot | null> => {
+          const p = projects.find((x) => x.id === id);
+          if (p === undefined) return null;
+          const g = buildGraph(p, await c.services(id));
+          return {
+            projectId: p.id,
+            name: p.name,
+            envKeys: p.envList.map((e) => e.key),
+            services: g.nodes
+              // System services exist on every project by construction; comparing them would
+              // report `core` as identical every time and say nothing.
+              .filter((n) => !n.system)
+              .map((n) => ({
+                name: n.name,
+                type: n.typeName.toLowerCase().replace(/\s+/g, ''),
+                version: n.version ?? '?',
+                mode: n.ha ? 'HA' : n.containers === null ? null : 'NON_HA',
+                publicHttp: n.publicHttp,
+              })),
+          };
+        };
+
+        const [a, b] = await Promise.all([snapshot(aId), snapshot(bId)]);
+        if (a === null || b === null) {
+          return sendJson(res, 404, { error: 'no_such_project', message: 'One of those projects is not on this account any more.' });
+        }
+        return sendJson(res, 200, compareEnvironments(a, b));
       }
 
       /** Which coding agents are installed on this machine. */

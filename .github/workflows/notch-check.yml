@@ -1,0 +1,48 @@
+# Will this pull request deploy?
+#
+# Runs the same drift engine the desktop app uses, against the real Zerops project this branch
+# is destined for, and fails the build when the code needs infrastructure the project does not
+# have. The findings arrive as inline annotations on the changed files and as a table in the
+# run summary, so the answer is on the pull request rather than in somebody's terminal.
+#
+# Setup: add ZEROPS_TOKEN to the repository secrets and set NOTCH_PROJECT to the project name.
+name: notch check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: repo vs infrastructure
+    runs-on: ubuntu-latest
+    env:
+      ZEROPS_TOKEN: ${{ secrets.ZEROPS_TOKEN }}
+      NOTCH_PROJECT: ${{ vars.NOTCH_PROJECT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Without a token the check cannot look, and a check that cannot look must not pass.
+      # Skipping loudly is honest; exiting 0 would make the gate decorative.
+      - name: Confirm the check can run
+        run: |
+          if [ -z "$ZEROPS_TOKEN" ]; then
+            echo "::warning::ZEROPS_TOKEN is not set — notch check cannot compare against Zerops."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+          if [ -z "$NOTCH_PROJECT" ]; then
+            echo "::warning::NOTCH_PROJECT is not set — nothing to compare against."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: notch check
+        if: env.SKIP != '1'
+        run: npm run -s check -- --project "$NOTCH_PROJECT" --dir . --format github
