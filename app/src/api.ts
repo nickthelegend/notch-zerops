@@ -147,6 +147,51 @@ export interface Hygiene {
   notes: string[];
 }
 
+/** One real REST call Notch made to Zerops. */
+export interface Action {
+  seq: number; ts: string; method: string; path: string; status: number;
+  ms: number; ok: boolean; write: boolean; summary: string; bytes: number; error: string | null;
+}
+
+export interface Choice { type: string; role: string; because: string }
+export interface Rejection { type: string; because: string }
+export interface Design {
+  chosen: Choice[]; rejected: Rejection[]; unavailable: string[];
+  understanding: string; agent: string; ms: number;
+}
+
+export interface SwarmProposal {
+  agent: string; lens: string; verb: string; because: string;
+  confidence: 'high' | 'medium' | 'low'; ms: number;
+}
+
+export interface Cycle {
+  startedAt: string;
+  signals: {
+    service: { id: string; name: string };
+    containers: { total: number; active: number };
+    policy: { minContainers: number | null; maxContainers: number | null };
+    load: {
+      url: string | null; samples: number; p50: number | null; p95: number | null;
+      slowest: number | null; errorRate: number | null; throughput: number | null;
+    };
+    notes: string[];
+  };
+  decision: {
+    verb: string; votes: number; of: number; proposals: SwarmProposal[];
+    target: { minContainers: number; maxContainers: number } | null;
+    rationale: string; clampNote: string | null;
+  };
+  applied: {
+    processId: string | null;
+    from: { minContainers: number | null; maxContainers: number | null };
+    to: { minContainers: number; maxContainers: number };
+    verified: boolean; note: string;
+  } | null;
+  discarded: Array<{ agent: string; lens: string; reason: string }>;
+  ms: number;
+}
+
 export interface AgentInfo { id: string; label: string; path: string }
 export interface Session { email: string; projectCount: number; tokenHint: string }
 export interface Project { id: string; name: string; status: string }
@@ -262,6 +307,15 @@ export const api = {
     }>(`/api/deploy/status?id=${encodeURIComponent(id)}&from=${from}`),
   /** Local, and deliberately not gated on a Zerops session — see the route's own note. */
   hygiene: (dir: string) => call<Hygiene>(`/api/hygiene?dir=${encodeURIComponent(dir)}`),
+  actions: (from: number) =>
+    call<{ actions: Action[]; counts: { total: number; writes: number; failed: number; ms: number } }>(
+      `/api/actions?from=${from}`),
+  architect: (agent: string, description: string) =>
+    call<Design>('/api/architect', json({ agent, description })),
+  swarmCycle: (o: {
+    projectId: string; serviceId: string; armed: boolean;
+    floor: number; ceiling: number; requests: number; concurrency: number;
+  }) => call<Cycle>('/api/swarm/cycle', json(o)),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
   propose: (agent: string, projectId: string, dir: string, ha: boolean) =>
     call<{

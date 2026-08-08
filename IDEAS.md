@@ -11,6 +11,12 @@ forgot — before the PR merges, with the line of code that proves it.**
 
 ---
 
+> **Added after the first hundred.** Three things the ranking did not contain, because they
+> came out of using the thing: an action log of every real REST call (the evidential answer to
+> "is this actually touching infrastructure"), an architect agent that turns a sentence into a
+> service set *and argues for it*, and a scaling panel that watches real load and resizes real
+> containers. The last one is the only feature here that writes to production.
+
 ## Tier 1 — the demo lives or dies on these
 
 1. `✅` Deploy the repo to a live URL, not just provision empty services
@@ -47,7 +53,7 @@ forgot — before the PR merges, with the line of code that proves it.**
 26. `—` Live polling with change notifications
 27. `—` Incident mode: freeze the board at a timestamp, export a report
 28. `—` Whole-account export as one yaml for disaster recovery
-29. `—` Agent tool loop: scan → propose → verify → refine
+29. `✅` Agent loop: observe → argue → decide → apply → verify
 30. `—` Baton handoff mid-thread, Claude → Codex
 
 ## Tier 4 — polish and motion
@@ -85,7 +91,7 @@ forgot — before the PR merges, with the line of code that proves it.**
 
 56. `—` Read and show build pipeline stages live from the API
 57. `—` Service logs tailed into the app
-58. `—` Container count autoscaling settings surfaced and editable
+58. `✅` Container count autoscaling settings surfaced, editable, and driven by agents
 59. `—` Custom domain attach flow
 60. `—` Zerops backup schedule visibility
 61. `—` Cron/scheduled job services
@@ -96,13 +102,13 @@ forgot — before the PR merges, with the line of code that proves it.**
 
 ## Tier 7 — agent depth
 
-66. `—` Three agents answer the same question side by side
+66. `✅` Three agents answer the same question side by side — the scaling panel
 67. `—` Agent explains a failed CI check inside the PR
 68. `—` Agent-authored PR description
 69. `—` Agent proposes the `run.envVariables` block
 70. `—` Agent reviews the exported yaml before you commit it
 71. `—` Agent watches the timeline and flags anomalies
-72. `—` Cost-aware agent: "this proposal adds roughly X"
+72. `✅` Cost-aware agent — one of the three lenses argues against spending
 73. `—` Agent memory across sessions, scoped per project
 74. `—` MCP server so external agents can call Notch's tools
 75. `—` ZCP integration for inside-the-project reach

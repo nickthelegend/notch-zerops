@@ -30,6 +30,9 @@ import { deriveWiring } from './zerops/wiring.js';
 import { toMermaid } from './zerops/mermaid.js';
 import { SCAN_GLOBS, findEnvNames, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
 import { sweep } from './repo/secrets.js';
+import * as journal from './zerops/journal.js';
+import { cycle, LENSES, type Cycle } from './ops/swarm.js';
+import { design } from './ops/architect.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, wiringSnippet, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
@@ -629,6 +632,134 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         });
         res.end(text);
         return;
+      }
+
+      /*
+       * Everything Notch has actually said to Zerops.
+       *
+       * The evidential endpoint. An app that draws infrastructure diagrams looks, from the
+       * outside, exactly like an app that draws pictures — this is the difference, in the form
+       * of a list of real requests with real status codes and real timings.
+       */
+      case '/api/actions': {
+        const from = Number(url.searchParams.get('from') ?? '0');
+        return sendJson(res, 200, {
+          actions: journal.since(Number.isFinite(from) ? from : 0),
+          counts: journal.counts(),
+        });
+      }
+
+      /*
+       * Plain English in, a service set with an argument out.
+       */
+      case '/api/architect': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = ((await readBody(req)) ?? {}) as Record<string, unknown>;
+        const agent = String(body['agent'] ?? '');
+        const description = String(body['description'] ?? '').trim();
+        if (agent === '' || description === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'agent and description are both required' });
+        }
+        /*
+         * The vocabulary is the LIVE catalogue, not a constant. An agent that proposes a
+         * service this account cannot actually create has proposed nothing, and the only way
+         * to know which those are is to ask.
+         */
+        const vocabulary = (await c.serviceTypes()).map((t) => t.typeId);
+        const d = await design(agent, description, vocabulary, process.cwd());
+        await record({
+          kind: 'agent_proposed', actor: agent,
+          payload: {
+            mode: 'architect', description,
+            chosen: d.chosen.map((x) => x.type), rejected: d.rejected.map((x) => x.type),
+            unavailable: d.unavailable,
+          },
+        }).catch(() => null);
+        return sendJson(res, 200, d);
+      }
+
+      /* The lenses the panel argues from. Read by the UI so the list lives in one place. */
+      case '/api/swarm/lenses': {
+        return sendJson(res, 200, { lenses: LENSES });
+      }
+
+      /*
+       * One observe → argue → decide → (apply) cycle.
+       *
+       * `armed` is required to be the literal boolean true. A truthy string is not consent to
+       * spend money on somebody's account, and `"false"` is truthy.
+       */
+      case '/api/swarm/cycle': {
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = ((await readBody(req)) ?? {}) as Record<string, unknown>;
+        const projectId = String(body['projectId'] ?? '');
+        const serviceId = String(body['serviceId'] ?? '');
+        if (projectId === '' || serviceId === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'projectId and serviceId are both required' });
+        }
+
+        const services = await c.services(projectId);
+        const svc = services.find((x) => x.id === serviceId);
+        if (svc === undefined) {
+          return sendJson(res, 404, { error: 'no_such_service', message: 'That service is not in this project.' });
+        }
+
+        const agents = available().map((a) => a.id);
+        if (agents.length === 0) {
+          return sendJson(res, 400, {
+            error: 'no_agents',
+            message: 'No agent CLIs are installed on this machine, so there is no panel to convene.',
+          });
+        }
+
+        const port = svc.ports.find((p) => p.httpRouting === true)?.port ?? svc.ports[0]?.port ?? null;
+        const liveUrl = port === null ? null : await c.publicUrl(projectId, svc.name, port).catch(() => null);
+
+        /*
+         * The ceiling is clamped SERVER-SIDE as well as in the decision layer. The client is
+         * the thing an attacker or a bug controls; `ceiling: 9999` arriving in a request body
+         * must not become 9999 containers.
+         */
+        const ceiling = Math.min(Math.max(Number(body['ceiling'] ?? 3), 1), 5);
+        const floor = Math.min(Math.max(Number(body['floor'] ?? 1), 1), ceiling);
+        const armed = body['armed'] === true;
+
+        const run: Cycle = await cycle(c, {
+          service: { id: svc.id, name: svc.name },
+          url: liveUrl,
+          bounds: { floor, ceiling },
+          agents,
+          cwd: process.cwd(),
+          armed,
+          load: {
+            count: Math.min(Math.max(Number(body['requests'] ?? 24), 1), 200),
+            concurrency: Math.min(Math.max(Number(body['concurrency'] ?? 6), 1), 20),
+          },
+        });
+
+        await record({
+          kind: run.applied === null ? 'swarm_decided' : 'swarm_applied',
+          scope: projectId,
+          actor: 'swarm',
+          payload: {
+            service: svc.name,
+            armed,
+            verb: run.decision.verb,
+            votes: `${run.decision.votes}/${run.decision.of}`,
+            rationale: run.decision.rationale,
+            proposals: run.decision.proposals.map((p) => ({ lens: p.lens, agent: p.agent, verb: p.verb, because: p.because })),
+            target: run.decision.target,
+            processId: run.applied?.processId ?? null,
+            verified: run.applied?.verified ?? null,
+            p95: run.signals.load.p95,
+            errorRate: run.signals.load.errorRate,
+            containers: run.signals.containers.active,
+          },
+        }).catch(() => null);
+
+        return sendJson(res, 200, run);
       }
 
       case '/api/drift': {

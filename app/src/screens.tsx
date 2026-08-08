@@ -12,14 +12,17 @@ import { T, radii, spacing } from './theme';
 import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented, ago, field } from './components';
 import { ArchCanvas, type Board, type Ghost } from './arch';
 import { ChatPanel } from './chat';
+import { Toasts, useToasts } from './toast';
+import { ActionsPanel, ArchitectPanel, AutopilotPanel } from './swarm';
 import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
-import { api, onReachChange, type BrainEvent, type Comparison, type DriftResp, type Graph, type Hygiene, type Plan, type Project, type Reach, type Session } from './api';
+import { api, onReachChange, type Action, type BrainEvent, type Comparison, type Cycle, type Design, type DriftResp, type Graph, type Hygiene, type Plan, type Project, type Reach, type Session } from './api';
 
 /* ------------------------------------------------------------------ gate */
 
 export function TokenScreen({ onConnected }: { onConnected: (s: Session) => void }) {
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
+  /* This screen keeps its inline banner: there is nothing else on it to be pushed down. */
   const [error, setError] = useState<string | null>(null);
 
   const connect = async () => {
@@ -74,7 +77,7 @@ export function TokenScreen({ onConnected }: { onConnected: (s: Session) => void
 
 /* ------------------------------------------------------------------ main */
 
-type Tab = 'arch' | 'drift' | 'secrets' | 'envs' | 'time';
+type Tab = 'arch' | 'drift' | 'secrets' | 'design' | 'auto' | 'actions' | 'envs' | 'time';
 
 export function ProjectScreen({ session, onDisconnect }: { session: Session; onDisconnect: () => void }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -84,21 +87,52 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [dir, setDir] = useState('');
   const [tab, setTab] = useState<Tab>('arch');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<(Plan & { types: string[]; ha: boolean }) | null>(null);
   const [ha, setHa] = useState(false);
   /** Services placed on the board by hand, folded into the same provision plan. */
   const [added, setAdded] = useState<string[]>([]);
   const [hygiene, setHygiene] = useState<Hygiene | null>(null);
+
+  /* The evidential log: every REST call this session, polled incrementally. */
+  const [actions, setActions] = useState<Action[]>([]);
+  const [actionCounts, setActionCounts] = useState({ total: 0, writes: 0, failed: 0, ms: 0 });
+
+  /* The panel that argues about scaling. Disarmed until somebody says otherwise. */
+  const [cycle, setCycle] = useState<Cycle | null>(null);
+  const [watching, setWatching] = useState('');
+  const [armed, setArmed] = useState(false);
+  const [ceiling, setCeiling] = useState(3);
+
+  /* Plain English in, a service set with an argument out. */
+  const [design, setDesign] = useState<Design | null>(null);
+  const [brief, setBrief] = useState('');
+  const [designAgent, setDesignAgent] = useState('');
+  const [agentList, setAgentList] = useState<Array<{ id: string; label: string }>>([]);
+  useEffect(() => {
+    void api.agents()
+      .then((r) => { setAgentList(r.agents); setDesignAgent((c) => (c === '' ? r.agents[0]?.id ?? '' : c)); })
+      .catch(() => setAgentList([]));
+  }, []);
   /**
    * Whether the daemon is answering. Not `navigator.onLine` — the daemon is on loopback, so
    * the machine can be off the network with everything working, and on it with the daemon dead.
    */
   const [reach, setReach] = useState<Reach>('ok');
   useEffect(() => onReachChange(setReach), []);
-  const [created, setCreated] = useState<string | null>(null);
-  /** A one-off confirmation with its own label — “CREATED” is wrong for three of the four. */
-  const [notice, setNotice] = useState<{ label: string; text: string } | null>(null);
+  /*
+   * Transient messages go OVER the app, not into the column.
+   *
+   * These were `Callout` banners in the main flow, and each one shortened the canvas: three
+   * actions in a row and the board you were working on was off the bottom of the window, under
+   * a stack of notices about things you had already done. Nothing is lost by fading — every one
+   * of these is also an entry in the action log, which is the durable place to look.
+   */
+  const { toasts, push, dismiss } = useToasts();
+  const setError = (t: string | null): void => { if (t !== null && t !== '') push('error', 'error', t); };
+  const setNotice = (n: { label: string; text: string } | null): void => {
+    if (n !== null) push('ok', n.label, n.text);
+  };
+  const setCreated = (t: string | null): void => { if (t !== null && t !== '') push('ok', 'provisioned', t); };
   const [events, setEvents] = useState<BrainEvent[] | null>(null);
   const [newName, setNewName] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
@@ -269,12 +303,81 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
     ];
   }, [drift, added]);
 
+  /** Pull in whatever the daemon has logged since we last looked. */
+  const loadActions = useCallback(async () => {
+    try {
+      const r = await api.actions(0);
+      setActions(r.actions);
+      setActionCounts(r.counts);
+    } catch { /* the reach banner already says the daemon is down */ }
+  }, []);
+
+  /*
+   * One observe → argue → decide → (apply) cycle.
+   *
+   * Slow on purpose: it puts real requests through the service and then waits on three agent
+   * CLIs. The button says "watching…" for as long as that takes rather than pretending to be
+   * instant.
+   */
+  const runCycle = () => void guard(async () => {
+    if (projectId === '' || watching === '') return;
+    setCycle(null);
+    try {
+      const c = await api.swarmCycle({
+        projectId, serviceId: watching, armed, floor: 1, ceiling,
+        requests: 24, concurrency: 6,
+      });
+      setCycle(c);
+      if (c.applied !== null) {
+        setNotice({
+          label: 'SCALED',
+          text: `${c.decision.votes} of ${c.decision.of} agents agreed. ${c.applied.note}`,
+        });
+      }
+      void loadActions();
+      setEvents((await api.history(projectId)).events);
+    } catch (e) { setError((e as Error).message); }
+  });
+
+  const runDesign = () => void guard(async () => {
+    if (designAgent === '' || brief.trim() === '') return;
+    setDesign(null);
+    try {
+      const d = await api.architect(designAgent, brief.trim());
+      setDesign(d);
+      void loadActions();
+    } catch (e) { setError((e as Error).message); }
+  });
+
   /** Drop a service on the board. It joins the plan; nothing is created until you confirm. */
   const addService = (type: string) => {
     setAdded((cur) => (cur.includes(type) ? cur : [...cur, type]));
     setPlan(null);
     setNotice({ label: 'ADDED', text: `${type} is on the board. Preview the plan to see the import file it produces.` });
   };
+
+  /*
+   * Keep the action log current while it is on screen.
+   *
+   * Polled rather than pushed: the daemon already answers a cheap incremental read, and a
+   * websocket for a list that changes a few times a minute is machinery nobody needs. It only
+   * runs while the tab is open, so a session spent on the board costs nothing.
+   */
+  useEffect(() => {
+    if (tab !== 'actions') return;
+    void loadActions();
+    const h = setInterval(() => void loadActions(), 2000);
+    return () => clearInterval(h);
+  }, [tab, loadActions]);
+
+  /* Watch the runtime by default — it is the only thing in a project that serves traffic. */
+  useEffect(() => {
+    if (graph === null) return;
+    setWatching((cur) => {
+      if (cur !== '' && graph.nodes.some((n) => n.id === cur)) return cur;
+      return graph.nodes.find((n) => n.kind === 'runtime')?.id ?? graph.nodes[0]?.id ?? '';
+    });
+  }, [graph]);
 
   const counts = drift?.drift.counts;
   const current = projects?.find((p) => p.id === projectId);
@@ -430,7 +533,6 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       )}
 
       {/* ---- banners ---- */}
-      {error !== null && <View style={{ padding: spacing.md }}><Callout label="ERROR" text={error} tint={T.err} /></View>}
       {/*
         The daemon stopped answering.
 
@@ -447,7 +549,6 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
           />
         </View>
       )}
-      {notice !== null && <View style={{ padding: spacing.md }}><Callout label={notice.label} text={notice.text} tint={T.ok} /></View>}
       {deployed !== null && (
         <View style={{ padding: spacing.md }}>
           <Panel tint={!deployed.done ? T.thread : deployed.ok === true ? T.ok : T.err}>
@@ -486,7 +587,6 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
           </Panel>
         </View>
       )}
-      {created !== null && <View style={{ padding: spacing.md }}><Callout label="PROVISIONED" text={created} tint={T.ok} /></View>}
 
       {/* ---- plan ---- */}
       {plan !== null && (
@@ -538,6 +638,8 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
         </ScrollView>
       )}
 
+      <Toasts toasts={toasts} onDismiss={dismiss} />
+
       {/* The board and the agents, side by side: you ask about what you are looking at. */}
       <View style={{ flex: 1, flexDirection: 'row', minHeight: 0 }}>
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -551,6 +653,9 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
           { key: 'arch', label: 'Architecture' },
           { key: 'drift', label: counts === undefined ? 'Drift' : `Drift (${(counts['missing'] ?? 0) + (drift?.config?.missing.length ?? 0)})` },
           { key: 'secrets', label: hygiene === null ? 'Secrets' : `Secrets (${hygiene.findings.length})`, alert: (hygiene?.findings.length ?? 0) > 0 },
+          { key: 'design', label: 'Design' },
+          { key: 'auto', label: armed ? 'Autopilot · armed' : 'Autopilot', alert: armed },
+          { key: 'actions', label: actionCounts.total === 0 ? 'Actions' : `Actions (${actionCounts.total})` },
           { key: 'envs', label: comparison === null ? 'Environments' : `Environments (${comparison.differences.length})` },
           { key: 'time', label: events === null ? 'Timeline' : `Timeline (${events.length})` },
         ]}
@@ -558,7 +663,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
 
       {tab === 'arch' && (
         board === null
-          ? <Empty text={error === null ? 'Loading your architecture…' : 'Could not read this project.'} />
+          ? <Empty text="Loading your architecture…" />
           : <ArchCanvas board={board} onAdd={addService} onProvision={preview} busy={busy} />
       )}
 
@@ -734,6 +839,47 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
             </>
           )}
         </ScrollView>
+      )}
+
+      {tab === 'design' && (
+        <ArchitectPanel
+          agents={agentList}
+          agent={designAgent}
+          onAgent={setDesignAgent}
+          description={brief}
+          onDescription={setBrief}
+          design={design}
+          onRun={runDesign}
+          busy={busy}
+          onAdopt={(types) => {
+            setAdded((cur) => [...new Set([...cur, ...types])]);
+            setPlan(null);
+            setTab('arch');
+            setNotice({
+              label: 'ADDED',
+              text: `${types.length} service(s) from ${design?.agent ?? 'the agent'} are on the board. Nothing is created until you confirm the plan.`,
+            });
+          }}
+        />
+      )}
+
+      {tab === 'auto' && (
+        <AutopilotPanel
+          services={graph?.nodes.filter((n) => !n.system) ?? []}
+          serviceId={watching}
+          onService={setWatching}
+          cycle={cycle}
+          onRun={runCycle}
+          busy={busy}
+          armed={armed}
+          onArmed={setArmed}
+          ceiling={ceiling}
+          onCeiling={setCeiling}
+        />
+      )}
+
+      {tab === 'actions' && (
+        <ActionsPanel actions={actions} counts={actionCounts} onRefresh={() => void loadActions()} busy={busy} />
       )}
 
       {tab === 'envs' && (

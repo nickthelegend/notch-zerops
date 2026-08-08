@@ -41,6 +41,8 @@ export const EVENT_KINDS = [
   'deploy_succeeded',
   'deploy_failed',
   'hygiene_swept',
+  'swarm_decided',
+  'swarm_applied',
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

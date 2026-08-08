@@ -19,6 +19,8 @@
  */
 import { z } from 'zod';
 
+import * as journal from './journal.js';
+
 export const ZEROPS_API_BASE = 'https://api.app-prg1.zerops.io/api/rest/public';
 
 /** The Zerops API refused us. Carries the status so callers can tell auth from a bad shape. */
@@ -161,22 +163,41 @@ export class ZeropsClient {
     return redactToken(this.token);
   }
 
+  /**
+   * The single choke point every Zerops request passes through — which is why the action log
+   * is hooked HERE rather than at each call site. One place to add it, and no way for a new
+   * endpoint to be added later that quietly escapes the record.
+   */
   private async call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
-    const res = await this.fetchImpl(`${this.base}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${this.token}`,
-        accept: 'application/json',
-        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    const t0 = Date.now();
+    const log = (status: number, bytes: number, error: string | null): void => {
+      journal.record({ method, path, status, ms: Date.now() - t0, ok: error === null, bytes, error });
+    };
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          accept: 'application/json',
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (e) {
+      // A transport failure never reached Zerops at all. Status 0 says exactly that, and it is
+      // a different fact from a 500 — one means the network, the other means the platform.
+      log(0, 0, (e as Error).message);
+      throw e;
+    }
 
     const text = await res.text();
     let parsed: unknown;
     try {
       parsed = text === '' ? {} : JSON.parse(text);
     } catch {
+      log(res.status, text.length, 'response was not JSON');
       throw new ZeropsApiError(res.status, path, `response was not JSON: ${text.slice(0, 120)}`);
     }
 
@@ -184,8 +205,10 @@ export class ZeropsClient {
       const msg =
         (parsed as { error?: { message?: string } }).error?.message ??
         `${res.statusText || 'request failed'}`;
+      log(res.status, text.length, msg);
       throw new ZeropsApiError(res.status, path, msg);
     }
+    log(res.status, text.length, null);
     return parsed as T;
   }
 
@@ -336,6 +359,105 @@ export class ZeropsClient {
   /** Delete one service. Used to clean up after a provisioning test. */
   async deleteService(serviceId: string): Promise<unknown> {
     return this.call('DELETE', `/service-stack/${encodeURIComponent(serviceId)}`);
+  }
+
+  /* ------------------------------------------------------------- scaling */
+
+  /**
+   * The autoscaling envelope Zerops is currently running a service inside.
+   *
+   * `currentAutoscaling` is the effective policy — the profile's values with any override
+   * applied. `customAutoscaling` is only the override, and it is mostly nulls, so reading that
+   * one to find out "how many containers may this run" gives you null and a wrong conclusion.
+   * Both are returned because a change has to be expressed against the override while being
+   * judged against the effective values.
+   */
+  async autoscaling(serviceId: string): Promise<{
+    name: string;
+    current: { minContainers: number | null; maxContainers: number | null; startCpu: number | null; maxCpu: number | null };
+    custom: { minContainers: number | null; maxContainers: number | null };
+  }> {
+    const raw = await this.call<{
+      name?: string;
+      currentAutoscaling?: {
+        horizontalAutoscaling?: { minContainerCount?: number | null; maxContainerCount?: number | null } | null;
+        verticalAutoscaling?: { startCpuCoreCount?: number | null; maxResource?: { cpuCoreCount?: number | null } | null } | null;
+      } | null;
+      customAutoscaling?: {
+        horizontalAutoscaling?: { minContainerCount?: number | null; maxContainerCount?: number | null } | null;
+      } | null;
+    }>('GET', `/service-stack/${encodeURIComponent(serviceId)}`);
+
+    const h = raw.currentAutoscaling?.horizontalAutoscaling ?? null;
+    const v = raw.currentAutoscaling?.verticalAutoscaling ?? null;
+    const c = raw.customAutoscaling?.horizontalAutoscaling ?? null;
+    return {
+      name: raw.name ?? serviceId,
+      current: {
+        minContainers: h?.minContainerCount ?? null,
+        maxContainers: h?.maxContainerCount ?? null,
+        startCpu: v?.startCpuCoreCount ?? null,
+        maxCpu: v?.maxResource?.cpuCoreCount ?? null,
+      },
+      custom: { minContainers: c?.minContainerCount ?? null, maxContainers: c?.maxContainerCount ?? null },
+    };
+  }
+
+  /**
+   * Change how many containers a service is allowed to run.
+   *
+   * `PUT /service-stack/{id}/autoscaling` — not documented anywhere this project could find,
+   * established by probing. Two things about it will cost you an afternoon.
+   *
+   * FIRST: THE BODY MUST BE WRAPPED IN `customAutoscaling`. The obvious shape — the one that
+   * mirrors what the GET returns at the top level — is accepted with a 200, creates a real
+   * process, and that process runs to FINISHED having changed nothing. No error, no warning,
+   * no clue. The wrapped form is the only one that takes effect:
+   *
+   *     { customAutoscaling: { verticalAutoscaling: …, horizontalAutoscaling: … } }
+   *
+   * This is the same failure mode as `envVariables` in the service import file, and it was
+   * caught the same way: by reading the value back afterwards instead of trusting the 200.
+   *
+   * SECOND: the call SCHEDULES the change rather than performing it. A caller that reads the
+   * service back immediately sees the old values and concludes it failed. The returned process
+   * id is how you find out when it really landed.
+   *
+   * `verticalAutoscaling: null` leaves the CPU and memory envelope alone. Sending a partial
+   * vertical block instead would reset the fields it omits.
+   */
+  async setContainerRange(
+    serviceId: string,
+    range: { minContainers: number | null; maxContainers: number | null },
+  ): Promise<{ processId: string | null }> {
+    const res = await this.call<{ process?: { id?: string } }>(
+      'PUT', `/service-stack/${encodeURIComponent(serviceId)}/autoscaling`,
+      {
+        customAutoscaling: {
+          verticalAutoscaling: null,
+          horizontalAutoscaling: {
+            minContainerCount: range.minContainers,
+            maxContainerCount: range.maxContainers,
+          },
+        },
+      },
+    );
+    return { processId: res.process?.id ?? null };
+  }
+
+  /** The containers actually running right now. The observable, as opposed to the policy. */
+  async containers(serviceId: string): Promise<Array<{ id: string; status: string; hostname: string }>> {
+    const res = await this.call<{ list?: Array<{ id?: string; status?: string; hostname?: string }> }>(
+      'GET', `/service-stack/${encodeURIComponent(serviceId)}/container`);
+    return (res.list ?? []).map((c) => ({
+      id: c.id ?? '', status: c.status ?? 'UNKNOWN', hostname: c.hostname ?? '',
+    }));
+  }
+
+  /** Whether a scheduled platform operation has finished, and how it went. */
+  async processStatus(processId: string): Promise<{ status: string }> {
+    const res = await this.call<{ status?: string }>('GET', `/process/${encodeURIComponent(processId)}`);
+    return { status: res.status ?? 'UNKNOWN' };
   }
 
   async services(projectId: string): Promise<ZService[]> {
