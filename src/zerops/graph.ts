@@ -237,13 +237,24 @@ export function layout(nodes: readonly ArchNode[], opts: { colWidth?: number; ro
     byTier.set(t, list);
   }
   const out: Positioned[] = [];
-  for (const [tier, list] of [...byTier.entries()].sort((a, b) => a[0] - b[0])) {
+  /*
+   * Rows are COMPACTED: an empty tier takes no vertical space.
+   *
+   * Tier numbers are a priority ordering, not coordinates. Using them directly left a
+   * 510px hole on a project with only runtimes and platform services, which made fitView
+   * zoom out until every card was unreadable -- a correct graph rendered as confetti. What
+   * matters is the ORDER of the occupied rows, not their original indices.
+   */
+  let row = 0;
+  for (const [, list] of [...byTier.entries()].sort((a, b) => a[0] - b[0])) {
     // Stable order inside a row, so the diagram does not reshuffle between polls -- a graph
     // whose boxes jump on every refresh is unreadable even when it is correct.
     list.sort((a, b) => a.name.localeCompare(b.name));
+    const y = row * rowHeight;
     list.forEach((n, i) => {
-      out.push({ ...n, position: { x: i * colWidth, y: tier * rowHeight } });
+      out.push({ ...n, position: { x: i * colWidth, y } });
     });
+    row += 1;
   }
   return out;
 }

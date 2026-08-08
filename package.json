@@ -5,12 +5,16 @@
   "description": "Brain — shared MCP memory, multi-agent coordination and infra judgement, native to Zerops",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.test.json",
     "build": "tsc",
     "test": "vitest run",
-    "migrate": "tsx src/db/migrate.ts"
+    "migrate": "tsx src/db/migrate.ts",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.22.0",

@@ -209,3 +209,26 @@ describe('layout', () => {
     expect(new Set(xs).size).toBe(3);
   });
 });
+
+describe('layout: empty tiers collapse', () => {
+  it('does not leave a gap for a tier nothing occupies', () => {
+    // Tier numbers are a priority ordering, not coordinates. A project with only runtimes
+    // and platform services was rendering with a 510px hole, which made fitView zoom out
+    // until every card was unreadable -- a correct graph shown as confetti.
+    const nodes = [
+      toNode(svc({ id: 'app', name: 'app', serviceStackTypeId: 'nodejs@22' })),
+      toNode(svc({ id: 'core', name: 'core', serviceStackTypeId: 'core', isSystem: true })),
+    ];
+    const ys = layout(nodes, { rowHeight: 100 }).map((n) => n.position.y).sort((a, b) => a - b);
+    expect(ys).toEqual([0, 100]);
+  });
+
+  it('still orders the occupied rows by tier', () => {
+    const nodes = [
+      toNode(svc({ id: 'core', name: 'core', serviceStackTypeId: 'core', isSystem: true })),
+      toNode(svc({ id: 'db', name: 'db', serviceStackTypeId: 'postgresql@16' })),
+    ];
+    const pos = Object.fromEntries(layout(nodes).map((n) => [n.id, n.position.y]));
+    expect(pos['db']).toBeLessThan(pos['core'] ?? 0);
+  });
+});
