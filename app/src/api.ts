@@ -69,7 +69,26 @@ export interface Comparison {
   identical: string[];
 }
 
+export interface WiringEdge {
+  from: string;
+  to: string;
+  because: string;
+  path: string;
+  found: string;
+  confidence: 'strong' | 'likely';
+  deployed: boolean;
+}
+
+export interface Wiring {
+  runtime: string | null;
+  edges: WiringEdge[];
+  platformEdgeCount: number;
+  note: string | null;
+}
+
 export interface DriftResp {
+  /** Edges read out of the code, with the line that proves each one. */
+  wiring?: Wiring;
   /** Variables the repo reads that the project does not define. */
   config?: ConfigDrift;
   dir: string;

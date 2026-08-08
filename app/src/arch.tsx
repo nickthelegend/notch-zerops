@@ -23,7 +23,7 @@ import { ScrollView, Text, View } from 'react-native';
 import Svg, { Circle, Path } from 'react-native-svg';
 
 import { T, radii } from './theme';
-import type { ArchNode, Graph } from './api';
+import type { ArchNode, Graph, Wiring } from './api';
 
 export interface Ghost { type: string; reason: string; confidence: string }
 
@@ -32,6 +32,8 @@ export interface Board {
   ghosts: Ghost[];
   /** The scanned repository, when there has been a scan. */
   repo: { dir: string; scanned: string[]; satisfied: number; missing: number } | null;
+  /** Edges read out of the code. `null` before a scan. */
+  wiring: Wiring | null;
 }
 
 /* ------------------------------------------------------------------ tiles */
@@ -156,10 +158,48 @@ function projectSize(count: number) {
   };
 }
 
+/** Centre of tile `i` in the wrapped grid, relative to the container's padding box. */
+const tileCentre = (i: number) => ({
+  x: PAD + (i % PER_ROW) * (TILE_W + TILE_GAP) + TILE_W / 2,
+  y: PAD + HEAD + Math.floor(i / PER_ROW) * (TILE_H + TILE_GAP) + TILE_H / 2,
+});
+
 function ProjectGroup({
-  name, status, nodes, ghosts, width,
-}: { name: string; status: string; nodes: ArchNode[]; ghosts: Ghost[]; width: number }) {
+  name, status, nodes, ghosts, width, wiring,
+}: {
+  name: string; status: string; nodes: ArchNode[]; ghosts: Ghost[]; width: number;
+  wiring: Wiring | null;
+}) {
   const tint = statusTint(status);
+
+  /*
+   * The edges, drawn between the tiles they connect.
+   *
+   * Tile positions are computed rather than measured: the grid is fixed-size and wraps at a
+   * known column count, so index arithmetic gives the same answer layout would, without
+   * needing every tile to report its box back up. The SVG is rendered BEFORE the tiles so the
+   * lines pass behind the cards instead of across their text.
+   */
+  const order = [
+    ...nodes.map((n) => ({ key: n.typeName.toLowerCase().replace(/[^a-z0-9]/g, ''), name: n.name })),
+    ...ghosts.map((g) => ({ key: g.type.toLowerCase(), name: g.type })),
+  ];
+  const indexOf = (type: string) => {
+    const t = type.toLowerCase();
+    return order.findIndex((o) => o.key.includes(t) || t.includes(o.key) || o.name.toLowerCase() === t);
+  };
+
+  const runtimeIdx = wiring?.runtime === undefined || wiring?.runtime === null ? -1 : indexOf(wiring.runtime);
+  const wires = wiring === null || runtimeIdx < 0
+    ? []
+    : wiring.edges.flatMap((e) => {
+      const j = indexOf(e.to);
+      if (j < 0 || j === runtimeIdx) return [];
+      const colour = !e.deployed ? T.err : e.confidence === 'likely' ? T.warn : T.thread;
+      return [{ a: tileCentre(runtimeIdx), b: tileCentre(j), colour, dashed: !e.deployed, key: `${e.from}-${e.to}` }];
+    });
+
+  const gridH = gridHeight(order.length);
   return (
     <View
       style={{
@@ -185,6 +225,23 @@ function ProjectGroup({
         </View>
       </View>
 
+      {/* Behind the cards: the edges the code claims. */}
+      {wires.length > 0 && (
+        <View pointerEvents="none" style={{ position: 'absolute', left: 0, top: 0 }}>
+          <Svg width={width} height={PAD * 2 + HEAD + gridH}>
+            {wires.map((w) => {
+              const dx = Math.max(30, Math.abs(w.b.x - w.a.x) * 0.45);
+              const d = `M ${w.a.x} ${w.a.y} C ${w.a.x + dx} ${w.a.y}, ${w.b.x - dx} ${w.b.y}, ${w.b.x} ${w.b.y}`;
+              return (
+                <Path key={w.key} d={d} stroke={w.colour} strokeWidth={1.4} fill="none"
+                  opacity={w.dashed ? 0.55 : 0.7}
+                  strokeDasharray={w.dashed ? '4 4' : undefined} strokeLinecap="round" />
+              );
+            })}
+          </Svg>
+        </View>
+      )}
+
       {/*
         An explicit height for the tile grid.
         A wrapping flex row sized itself to less than its own content here, and the last row —
@@ -194,7 +251,7 @@ function ProjectGroup({
       <View
         style={{
           flexDirection: 'row', flexWrap: 'wrap', gap: TILE_GAP,
-          height: gridHeight(nodes.length + ghosts.length),
+          height: gridH,
         }}
       >
         {nodes.map((n) => <ServiceTile key={n.id} n={n} />)}
@@ -286,6 +343,7 @@ export function ArchCanvas({ board }: { board: Board }) {
               nodes={graph.nodes}
               ghosts={ghosts}
               width={layout.size.w}
+              wiring={board.wiring}
             />
           </View>
         </View>

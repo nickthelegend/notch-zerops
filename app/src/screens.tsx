@@ -202,6 +202,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       satisfied: counts?.['satisfied'] ?? 0,
       missing: counts?.['missing'] ?? 0,
     },
+    wiring: drift?.wiring ?? null,
   };
 
   return (

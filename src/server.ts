@@ -26,6 +26,7 @@ import { buildGraph, layout } from './zerops/graph.js';
 import { computeDrift } from './zerops/drift.js';
 import { compareConfig } from './zerops/config.js';
 import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
+import { deriveWiring } from './zerops/wiring.js';
 import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
@@ -474,8 +475,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           [...graph.nodes.map((n) => n.name), ...graph.nodes.map((n) => n.typeName)],
         );
 
+        // Edges the platform does not know about yet, read from the same evidence.
+        const wiring = deriveWiring(required, graph.nodes, graph.edges.length);
+
         const history = logged.persisted ? await unresolvedDrift(projectId).catch(() => []) : [];
         return sendJson(res, 200, {
+          wiring,
           config,
           history,
           ...(logged.persisted ? {} : { historyNote: `This scan was not recorded: ${logged.reason}. The findings below are still real; only the history is missing.` }),
