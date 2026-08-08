@@ -27,6 +27,7 @@ export const EVENT_KINDS = [
   'session_opened',
   'session_closed',
   'graph_read',
+  'project_created',
   'repo_scanned',
   'provision_planned',
   'provision_started',

@@ -7,3 +7,7 @@ web/
 !.env.example
 research/recipes/
 .DS_Store
+
+# Expo web export (built artifact, like web/)
+web-app/
+app/.expo/

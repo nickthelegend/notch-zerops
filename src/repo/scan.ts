@@ -231,6 +231,44 @@ export function scanRepo(files: readonly RepoFile[]): Requirement[] {
   ];
 }
 
+/**
+ * Env var names that look like application secrets.
+ *
+ * NAMES ONLY. The value on the right of the `=` is never read, never returned, and never
+ * leaves this machine. That is not fastidiousness: the whole point is to declare
+ * `JWT_SECRET` as a secret on the new project, and the correct value for a fresh environment
+ * is a NEW random one, not a copy of whatever is sitting in somebody's local `.env`. Copying
+ * it would take a development credential and post it to a remote service.
+ *
+ * Connection strings are deliberately excluded. `DATABASE_URL` and friends are secrets, but
+ * Zerops injects them itself once the database service exists — declaring our own would
+ * shadow the platform's with a random string and break the app in a way that looks like a
+ * connection bug.
+ */
+const SECRET_NAME =
+  /(SECRET|PASSWORD|PASSWD|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|_SALT|JWT|SIGNING|PEPPER|_KEY$|_KEY_ID$)/i;
+
+/**
+ * A key that is meant to be seen. `STRIPE_PUBLISHABLE_KEY` ends in `_KEY` and belongs in the
+ * client bundle; replacing it with a generated random string would break checkout in a way
+ * that looks like a Stripe outage.
+ */
+const NOT_SECRET = /(PUBLIC|PUBLISHABLE)/i;
+
+const PLATFORM_INJECTED = /(_URL|_URI|_HOST|_PORT|_DSN)$/i;
+
+export function findSecretNames(files: readonly RepoFile[]): string[] {
+  const out = new Set<string>();
+  for (const f of files) {
+    const name = base(f.path);
+    if (name !== '.env' && name !== '.env.example' && !name.startsWith('.env.')) continue;
+    for (const v of envNames(f.content)) {
+      if (SECRET_NAME.test(v) && !NOT_SECRET.test(v) && !PLATFORM_INJECTED.test(v)) out.add(v);
+    }
+  }
+  return [...out].sort();
+}
+
 /** Files worth reading. Keeps the desktop app from slurping node_modules off disk. */
 export const SCAN_GLOBS: readonly string[] = [
   'package.json', 'requirements.txt', 'pyproject.toml', 'Pipfile', 'composer.json',

@@ -24,8 +24,8 @@ import { fileURLToPath } from 'node:url';
 import { ZeropsApiError, ZeropsClient, redactToken } from './zerops/api.js';
 import { buildGraph, layout } from './zerops/graph.js';
 import { computeDrift } from './zerops/drift.js';
-import { SCAN_GLOBS, scanRepo, type RepoFile } from './repo/scan.js';
-import { ServiceCatalog, buildImportYaml, safeHostname } from './zerops/catalog.js';
+import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
+import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
 import { LockManager } from './core/lock.js';
@@ -118,6 +118,9 @@ class BadRequest extends Error {
 
 const MAX_BODY_BYTES = 256 * 1024;
 
+/** Service types that RUN the application, as opposed to backing it. */
+const RUNTIME_TYPES = ['nodejs', 'python', 'go', 'php', 'dotnet', 'rust', 'java', 'bun', 'deno', 'elixir', 'ruby'];
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -156,9 +159,11 @@ async function readRepo(dir: string): Promise<RepoFile[]> {
 
 interface Plan {
   projectId: string;
-  services: Array<{ hostname: string; type: string; mode: 'HA' | 'NON_HA' }>;
+  services: ImportService[];
   /** Requested types the platform has no equivalent for. Reported, never silently dropped. */
   unresolved: string[];
+  /** Secret env var names found in the repo, declared on the runtime. Names only. */
+  secrets: string[];
   yaml: string;
 }
 
@@ -170,17 +175,27 @@ interface Plan {
  */
 async function buildPlan(
   c: ZeropsClient,
-  body: { projectId?: unknown; types?: unknown; ha?: unknown },
+  body: { projectId?: unknown; types?: unknown; ha?: unknown; dir?: unknown },
 ): Promise<Plan | { error: string; message: string }> {
   const projectId = typeof body.projectId === 'string' ? body.projectId : '';
   const types = Array.isArray(body.types) ? body.types.filter((t): t is string => typeof t === 'string') : [];
   const ha = body.ha === true;
+  const dir = typeof body.dir === 'string' ? body.dir : '';
   if (projectId === '' || types.length === 0) {
     return { error: 'missing_params', message: 'projectId and a non-empty types[] are required.' };
   }
 
   const project = (await c.projects()).find((p) => p.id === projectId);
   if (project === undefined) return { error: 'no_such_project', message: `No project ${projectId} on this account.` };
+
+  /*
+   * Secrets ride on the RUNTIME, because that is the service that reads them. Declaring
+   * `JWT_SECRET` on a Postgres container would create a real secret nothing can use.
+   *
+   * Only names are collected; Zerops generates the values during the import. See
+   * `findSecretNames` for why copying local values would be the wrong thing to do.
+   */
+  const secrets = dir === '' || !existsSync(dir) ? [] : findSecretNames(await readRepo(dir));
 
   const catalog = new ServiceCatalog(c);
   const existing = (await c.services(projectId)).map((s) => s.name);
@@ -198,7 +213,14 @@ async function buildPlan(
     services.push({ hostname, ...spec });
   }
 
-  return { projectId, services, unresolved, yaml: buildImportYaml(services) };
+  // A runtime is what serves traffic and holds the app's secrets. `nodejs`, `python`, `go`…
+  const runtime = services.find((s) => RUNTIME_TYPES.some((r) => s.type.startsWith(r)));
+  if (runtime !== undefined) {
+    if (secrets.length > 0) runtime.secrets = secrets;
+    runtime.publicUrl = true;
+  }
+
+  return { projectId, services, unresolved, secrets, yaml: buildImportYaml(services) };
 }
 
 async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> {
@@ -214,9 +236,39 @@ async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> 
   }
 }
 
+/**
+ * Only a page served from this machine may drive this API.
+ *
+ * The Expo dev server runs on its own port, so the app is cross-origin during development and
+ * the browser needs to be told that is allowed. It is NOT told `*`. This daemon holds a live
+ * Zerops token and can create billable infrastructure; a wildcard would let any website you
+ * happen to have open issue provisioning requests against your account from your own browser.
+ *
+ * So the origin is reflected back only when it is loopback. Anything else gets no CORS header
+ * at all, and the browser refuses the response on its own.
+ */
+const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+$/;
+
+function applyCors(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin;
+  if (typeof origin !== 'string' || !LOCAL_ORIGIN.test(origin)) return;
+  res.setHeader('access-control-allow-origin', origin);
+  res.setHeader('vary', 'origin');
+  res.setHeader('access-control-allow-methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('access-control-allow-headers', 'content-type');
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname;
+
+  applyCors(req, res);
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (!path.startsWith('/api/')) return serveStatic(res, path);
 
   try {
@@ -274,6 +326,66 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const c = requireClient(res);
         if (c === null) return;
         return sendJson(res, 200, { projects: await c.projects() });
+      }
+
+      /**
+       * Create an empty project.
+       *
+       * Deliberately ONE responsibility. It would be easy to accept a repo path here and
+       * create-and-fill in a single call, and the result would be an action that provisions
+       * infrastructure with no preview step. Creating the project is cheap and reversible;
+       * filling it is neither. So this returns an empty project, and the existing
+       * scan -> preview -> provision path fills it, with the import file shown first.
+       *
+       * This WRITES: a project is a real, billable object.
+       */
+      case '/api/project': {
+        if (req.method !== 'POST') {
+          return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST -- this creates a real project on your Zerops account.' });
+        }
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { name?: unknown; tags?: unknown };
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (name === '') {
+          return sendJson(res, 400, { error: 'missing_name', message: 'A project name is required.' });
+        }
+        const tags = Array.isArray(body.tags) ? body.tags.filter((t): t is string => typeof t === 'string') : [];
+
+        // Refused up front rather than letting Zerops reject it after the round trip, because
+        // the platform's own message for a duplicate does not mention the name.
+        if ((await c.projects()).some((p) => p.name === name)) {
+          return sendJson(res, 409, { error: 'name_taken', message: `This account already has a project called "${name}".` });
+        }
+
+        const project = await c.createProject(name, tags);
+
+        /*
+         * Wait until the project is FINDABLE, not merely created.
+         *
+         * `/project/search` is eventually consistent: for a second or two after creation the
+         * new project is not in the list yet. Returning immediately meant the UI selected it,
+         * asked for its architecture, and got a 404 that renders as "that project is not on
+         * this account any more" — the most alarming possible message about a project the user
+         * had just successfully made. Observed on the very first real run of this endpoint.
+         *
+         * So "created" means "created and visible to the next read". If it never appears we
+         * still return it, with a note, rather than pretend the creation failed — the project
+         * does exist and inventing a failure would be worse than a slow success.
+         */
+        let visible = false;
+        for (let i = 0; i < 12; i += 1) {
+          if ((await c.projects()).some((p) => p.id === project.id)) { visible = true; break; }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        await record({ kind: 'project_created', scope: project.id, payload: { name: project.name, tags } });
+        return sendJson(res, 200, {
+          project,
+          ...(visible ? {} : {
+            note: 'Zerops accepted the project but is not listing it yet. Press Refresh in a moment.',
+          }),
+        });
       }
 
       /** The architecture, laid out and ready for React Flow. */
@@ -503,10 +615,27 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           '',
         ].join('\n');
 
+        /*
+         * Secrets go on the runtime, as generator expressions rather than values. This file is
+         * meant to be committed, so it must name what the app needs without containing any of
+         * it -- Zerops evaluates `generateRandomString` on import.
+         */
+        const secretNames = findSecretNames(files);
+        const runtimeHost = resolved.find((r) => RUNTIME_TYPES.some((t) => r.type.startsWith(t)))?.hostname;
+
         const body = resolved.length === 0
           ? 'services: []\n'
-          : 'services:\n' + resolved.map((r) =>
-              `  # ${r.why}\n  - hostname: ${r.hostname}\n    type: ${r.type}\n    mode: ${r.mode}\n`).join('');
+          : 'services:\n' + resolved.map((r) => {
+              const lines = [`  # ${r.why}`, `  - hostname: ${r.hostname}`, `    type: ${r.type}`, `    mode: ${r.mode}`];
+              if (r.hostname === runtimeHost) {
+                lines.push('    enableSubdomainAccess: true');
+                if (secretNames.length > 0) {
+                  lines.push('    envSecrets:');
+                  for (const k of secretNames) lines.push(`      ${k}: <@generateRandomString(<32>)>`);
+                }
+              }
+              return `${lines.join('\n')}\n`;
+            }).join('');
 
         await record({ kind: 'yaml_exported', scope: projectId, payload: { dir, services: resolved.length, unresolved } });
 

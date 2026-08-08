@@ -222,6 +222,34 @@ export class ZeropsClient {
   }
 
   /**
+   * Create an empty project.
+   *
+   * `POST /client/{clientId}/project`, found by probing — `POST /project` is a flat 404, and
+   * `PUT /project/import` answers "Project not found" for every body you can construct,
+   * including a well-formed `project:` block, because it imports INTO a project rather than
+   * making one. The account id is in the path, not the body.
+   *
+   * `tagList` is required. Not optional-with-a-default — omitting it fails with
+   * `{"tagList":["field is required"]}` even when `name` is present and valid, so an empty
+   * array is sent explicitly rather than left out.
+   *
+   * This WRITES. A project is a real, billable object on the account.
+   */
+  async createProject(name: string, tagList: readonly string[] = []): Promise<ZProject> {
+    const cid = await this.clientId();
+    const raw = await this.call<unknown>('POST', `/client/${encodeURIComponent(cid)}/project`, {
+      name,
+      tagList: [...tagList],
+    });
+    return ZProjectSchema.parse(raw);
+  }
+
+  /** Delete a project and everything in it. Used to clean up after a demo. */
+  async deleteProject(projectId: string): Promise<unknown> {
+    return this.call('DELETE', `/project/${encodeURIComponent(projectId)}`);
+  }
+
+  /**
    * Add services to an EXISTING project, via an import file.
    *
    * `POST /project/{id}/service-stack/import`, found by probing: the documented path is the

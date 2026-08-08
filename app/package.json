@@ -1,0 +1,25 @@
+{
+  "name": "notch-zerops-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Notch — the Zerops screens, in the same Expo app and the same design system as Notch itself.",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "web": "expo start --web",
+    "start": "expo start",
+    "export": "expo export --platform web --output-dir ../web-app"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~4.0.1",
+    "expo": "~52.0.0",
+    "expo-status-bar": "~2.0.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-native": "0.76.9",
+    "react-native-web": "~0.19.13"
+  },
+  "devDependencies": {
+    "@types/react": "~18.3.12",
+    "typescript": "~5.3.3"
+  }
+}

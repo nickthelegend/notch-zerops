@@ -27,8 +27,18 @@ describe('parseVersion', () => {
     expect(parseVersion('valkey:single@7.2')?.version).toBe('7.2');
   });
 
-  it('handles the runtime form with an OS prefix', () => {
-    expect(parseVersion('alpine/nodejs@22')).toEqual({ base: 'nodejs', ha: false, version: '22' });
+  it('KEEPS the OS prefix on a runtime, because the platform requires it', () => {
+    /*
+     * This test previously asserted the opposite — that `alpine/nodejs@22` parses to a base of
+     * `nodejs` — and the assertion was simply wrong about the platform. Emitting `nodejs@24`
+     * gets `400 Service base not found.`; `alpine/nodejs@24` is accepted. Found by importing
+     * each type of a seven-service plan individually: the five managed services succeeded with
+     * bare base names and the runtime was the only failure.
+     *
+     * A passing test is not evidence when it encodes a belief nobody checked.
+     */
+    expect(parseVersion('alpine/nodejs@22')).toEqual({ base: 'alpine/nodejs', ha: false, version: '22' });
+    expect(parseVersion('ubuntu/nodejs@24')).toEqual({ base: 'ubuntu/nodejs', ha: false, version: '24' });
   });
 
   it('returns null on a shape it does not recognise, rather than half-parsing it', () => {
@@ -76,6 +86,20 @@ describe('pickVersion', () => {
 
   it('honours HA when it is available', () => {
     expect(pickVersion(entry('valkey', ['valkey:single@7.2', 'valkey:ha@7.2']), true)?.mode).toBe('HA');
+  });
+
+  it('emits a runtime with its OS prefix, and picks alpine deterministically', () => {
+    // The exact shape the import endpoint accepts. `nodejs@24` is rejected outright.
+    const e = entry('nodejs', [
+      'ubuntu/nodejs@22', 'alpine/nodejs@22', 'ubuntu/nodejs@24', 'alpine/nodejs@24',
+    ]);
+    expect(pickVersion(e, false)).toEqual({ type: 'alpine/nodejs@24', mode: 'NON_HA' });
+  });
+
+  it('still emits managed services WITHOUT a prefix', () => {
+    // The other half of the same rule: a prefix here would be equally wrong.
+    expect(pickVersion(entry('postgresql', ['postgresql:single@18']), false)?.type).toBe('postgresql@18');
+    expect(pickVersion(entry('valkey', ['valkey:single@7.2']), false)?.type).toBe('valkey@7.2');
   });
 
   it('returns null for a type with no parseable versions', () => {
