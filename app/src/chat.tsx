@@ -11,7 +11,8 @@
  * looking more authoritative than it is.
  */
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import Svg, { Circle, Path, Rect } from 'react-native-svg';
 
 import { T, radii, spacing } from './theme';
 import { Btn, field } from './components';
@@ -33,6 +34,75 @@ const SUGGESTIONS = [
   'Which of these gaps matters first, and why?',
 ];
 
+/**
+ * A mark per agent, drawn rather than fetched.
+ *
+ * Each is the shape of that tool's own identity in its own colour — a burst for Claude, a
+ * knot for Codex, a four-point spark for Gemini, brackets for OpenCode — not a traced
+ * trademark, and not a downloaded asset. The app ships no network images and no icon font, so
+ * an agent still reads as itself with the machine offline, which is the state Notch is usually
+ * in when it is doing something interesting.
+ */
+const MARK: Readonly<Record<string, string>> = {
+  claude: '#d97757', codex: '#74aa9c', gemini: '#8ab4f8', opencode: '#a78bfa',
+};
+const markTint = (id: string): string => MARK[id] ?? T.dim;
+
+function AgentMark({ id, size = 16 }: { id: string; size?: number }) {
+  const c = markTint(id);
+  if (id === 'claude') {
+    // Radiating strokes from a common centre.
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        {[0, 45, 90, 135].map((deg) => {
+          const r = (deg * Math.PI) / 180;
+          const dx = Math.cos(r) * 8.5;
+          const dy = Math.sin(r) * 8.5;
+          return (
+            <Path
+              key={deg}
+              d={`M ${12 - dx} ${12 - dy} L ${12 + dx} ${12 + dy}`}
+              stroke={c} strokeWidth={2.4} strokeLinecap="round"
+            />
+          );
+        })}
+      </Svg>
+    );
+  }
+  if (id === 'gemini') {
+    // Four-point spark with concave sides.
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        <Path
+          d="M12 1 C 13 8 16 11 23 12 C 16 13 13 16 12 23 C 11 16 8 13 1 12 C 8 11 11 8 12 1 Z"
+          fill={c}
+        />
+      </Svg>
+    );
+  }
+  if (id === 'codex') {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        <Circle cx={12} cy={12} r={9} stroke={c} strokeWidth={2.2} fill="none" />
+        <Circle cx={12} cy={12} r={3.4} fill={c} />
+      </Svg>
+    );
+  }
+  if (id === 'opencode') {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24">
+        <Path d="M9 4 L3.5 12 L9 20" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <Path d="M15 4 L20.5 12 L15 20" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      </Svg>
+    );
+  }
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Rect x={4} y={4} width={16} height={16} rx={4} stroke={c} strokeWidth={2.2} fill="none" />
+    </Svg>
+  );
+}
+
 export function ChatPanel({
   projectId, dir, canPropose, onPlan,
 }: {
@@ -48,6 +118,7 @@ export function ChatPanel({
   const [draft, setDraft] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
   const scroller = useRef<ScrollView | null>(null);
   const nextId = useRef(1);
 
@@ -124,7 +195,7 @@ export function ChatPanel({
   return (
     <View style={{ flex: 1, backgroundColor: T.panel, borderLeftColor: T.line, borderLeftWidth: 1 }}>
       {/* who is answering */}
-      <View style={{ padding: spacing.md, borderBottomColor: T.line, borderBottomWidth: 1, gap: 8 }}>
+      <View style={{ padding: spacing.md, borderBottomColor: T.line, borderBottomWidth: 1, gap: 8, zIndex: 30 }}>
         <Text style={{ color: T.dim, fontFamily: T.mono, fontSize: 10, letterSpacing: 0.8 }}>ASK AN AGENT</Text>
         {agents === null ? (
           <Text style={{ color: T.faint, fontSize: 12 }}>looking for agents on this machine…</Text>
@@ -134,28 +205,68 @@ export function ChatPanel({
             Code, Codex, OpenCode or Gemini and reopen.
           </Text>
         ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+          <Pressable
+            onPress={() => setPicking((v) => !v)}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 9,
+              backgroundColor: T.raised, borderColor: picking ? T.line2 : T.line, borderWidth: 1,
+              borderRadius: radii.input, paddingHorizontal: 11, paddingVertical: 9,
+            }}
+          >
+            <AgentMark id={agent} size={17} />
+            <Text style={{ color: T.text, fontSize: 13, fontWeight: '600', flex: 1 }}>
+              {agents.find((a) => a.id === agent)?.label ?? 'Pick an agent'}
+            </Text>
+            <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 10 }}>
+              {agents.length} on PATH
+            </Text>
+            <Text style={{ color: T.dim, fontSize: 10 }}>{picking ? '▲' : '▼'}</Text>
+          </Pressable>
+        )}
+      </View>
+
+      {/*
+        The menu is a SIBLING of the header, not a child of it.
+
+        Every react-native-web View clips its overflow, so a menu absolutely positioned inside
+        the header would be cut off at the header's own bottom border — visible as a one-line
+        sliver. Hung off the panel root instead, where there is room for it.
+      */}
+      {picking && agents !== null && agents.length > 0 && (
+        <>
+          <Pressable
+            onPress={() => setPicking(false)}
+            style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 40 }}
+          />
+          <View style={{
+            position: 'absolute', top: 74, left: spacing.md, right: spacing.md, zIndex: 50,
+            backgroundColor: T.raised, borderColor: T.line, borderWidth: 1, borderRadius: radii.card,
+            paddingVertical: 5, overflow: 'hidden',
+          }}>
             {agents.map((a) => {
               const on = a.id === agent;
               return (
-                <Text
+                <Pressable
                   key={a.id}
-                  onPress={() => setAgent(a.id)}
+                  onPress={() => { setAgent(a.id); setPicking(false); }}
                   style={{
-                    color: on ? T.onBright : T.dim,
-                    backgroundColor: on ? T.bright : T.raised,
-                    borderColor: on ? T.bright : T.line, borderWidth: 1,
-                    borderRadius: radii.pill, paddingHorizontal: 11, paddingVertical: 5,
-                    fontSize: 12, fontWeight: on ? '700' : '500', overflow: 'hidden',
+                    flexDirection: 'row', alignItems: 'center', gap: 10,
+                    paddingHorizontal: 11, paddingVertical: 9,
+                    backgroundColor: on ? T.panel : 'transparent',
                   }}
                 >
-                  {a.label}
-                </Text>
+                  <AgentMark id={a.id} size={17} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ color: T.text, fontSize: 13, fontWeight: on ? '700' : '500' }}>{a.label}</Text>
+                    <Text numberOfLines={1} style={{ color: T.faint, fontFamily: T.mono, fontSize: 10 }}>{a.path}</Text>
+                  </View>
+                  {on && <Text style={{ color: markTint(a.id), fontSize: 12 }}>✓</Text>}
+                </Pressable>
               );
             })}
-          </ScrollView>
-        )}
-      </View>
+          </View>
+        </>
+      )}
 
       {/* thread */}
       <ScrollView
@@ -197,8 +308,12 @@ export function ChatPanel({
         ) : (
           <View key={t.id} style={{ gap: 5 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
-              <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: t.failed === true ? T.err : T.primary }} />
-              <Text style={{ color: t.failed === true ? T.err : T.primary, fontFamily: T.mono, fontSize: 10, letterSpacing: 0.5 }}>
+              {/* Who said it, in their own colour: two agents disagreeing should look different. */}
+              <AgentMark id={t.agentId ?? ''} size={13} />
+              <Text style={{
+                color: t.failed === true ? T.err : markTint(t.agentId ?? ''),
+                fontFamily: T.mono, fontSize: 10, letterSpacing: 0.5,
+              }}>
                 {(t.label ?? '').toUpperCase()}
               </Text>
               {t.ms !== undefined && (

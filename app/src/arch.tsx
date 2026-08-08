@@ -1,28 +1,34 @@
 /**
- * The board: your account's projects, the services inside them, and the repository they were
- * measured against.
+ * The board — a real node canvas.
  *
- * The composition follows the Zerops architecture diagrams — projects as grouped containers
- * with a status pill, services as small tiles inside them, and curved connectors between the
- * thing that caused a change and the thing it changed. Rendered in graphite rather than on
- * white, because this is a tool that sits open next to an editor, not a diagram in a doc.
+ * React Flow, rendered as DOM inside the react-native-web tree. That is only possible because
+ * this ships as a desktop app in Electron; the trade was made deliberately when the target
+ * became desktop-only. What it buys is everything hand-rolled dragging could not: pan the
+ * whole canvas, zoom, fit, marquee-select, real edge routing with handles, and nodes that
+ * behave the way every node editor behaves — so nobody has to learn this one.
  *
- * TWO DECISIONS THAT ARE THE WHOLE POINT:
+ * WHAT THE BOARD SAYS THAT A LIST CANNOT:
  *
- *   Gaps are drawn INSIDE the project they are missing from. An earlier version put ghosts in
- *   their own row underneath, which quietly said "here is a list of problems" — the same thing
- *   a sidebar already says. In place, a project with holes in it looks like a project with
- *   holes in it, and the shape of the gap is the finding.
+ *   Gaps are drawn beside the services they are missing from, dashed. A project with holes in
+ *   it looks like a project with holes in it, and the shape of the gap is the finding.
  *
- *   The repository is a node on the board, not a text field somewhere else. What the graph is
- *   actually about is the relationship between a repo and the infrastructure it expects, so
- *   the repo is drawn, and the connector carries the verdict.
+ *   Edges come from the REPOSITORY, not from Zerops. Zerops learns about a connection when
+ *   somebody wires one; the code knows on the first commit. Every edge is labelled with the
+ *   import that proves it, so the diagram makes an argument rather than decorating one.
+ *
+ *   The repository is a node too, because the relationship between a repo and the
+ *   infrastructure it expects is what the whole app is about.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, ScrollView, Text, View } from 'react-native';
-import Svg, { Circle, Path } from 'react-native-svg';
+import { View } from 'react-native';
+import {
+  Background, BackgroundVariant, Controls, Handle, MiniMap, Position, ReactFlow,
+  ReactFlowProvider, applyNodeChanges, useReactFlow,
+  type Edge, type Node, type NodeChange, type NodeProps,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 
-import { T, radii } from './theme';
+import { T } from './theme';
 import type { ArchNode, Graph, Wiring } from './api';
 
 export interface Ghost { type: string; reason: string; confidence: string }
@@ -30,25 +36,14 @@ export interface Ghost { type: string; reason: string; confidence: string }
 export interface Board {
   graph: Graph;
   ghosts: Ghost[];
-  /** The scanned repository, when there has been a scan. */
   repo: { dir: string; scanned: string[]; satisfied: number; missing: number } | null;
-  /** Edges read out of the code. `null` before a scan. */
   wiring: Wiring | null;
+  /** Services added by hand on the canvas, folded into the same provision plan. */
+  added: string[];
 }
 
-/* ------------------------------------------------------------------ tiles */
+/* ----------------------------------------------------------------- tokens */
 
-const TILE_W = 108;
-const TILE_H = 84;
-const TILE_GAP = 12;
-const PER_ROW = 4;
-
-/**
- * A mark per service kind.
- *
- * Deliberately drawn from the same small vocabulary rather than emoji: emoji render at a
- * different weight on every platform and turn a technical board into a sticker sheet.
- */
 const KIND = {
   runtime: { glyph: '▶', tint: '#a78bfa' },
   database: { glyph: '▤', tint: '#67e8f9' },
@@ -59,7 +54,6 @@ const KIND = {
   system: { glyph: '⚙', tint: '#888888' },
   unknown: { glyph: '◻', tint: '#888888' },
 } as const;
-
 const kindOf = (k: string) => KIND[k as keyof typeof KIND] ?? KIND.unknown;
 
 const statusTint = (s: string): string => {
@@ -69,491 +63,502 @@ const statusTint = (s: string): string => {
   return T.dim;
 };
 
-function ServiceTile({ n }: { n: ArchNode }) {
+const SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+
+const card: React.CSSProperties = {
+  width: 178, boxSizing: 'border-box', borderRadius: 14, padding: 12,
+  background: T.panel, border: `1px solid ${T.line}`,
+  boxShadow: '0 6px 18px rgba(0,0,0,.45)', fontFamily: SANS,
+};
+
+/* ------------------------------------------------------------------ nodes */
+
+function ServiceNode({ data }: NodeProps) {
+  const n = data['node'] as ArchNode;
   const k = kindOf(n.kind);
   return (
-    <View
-      style={{
-        width: TILE_W, height: TILE_H,
-        backgroundColor: T.panel,
-        borderColor: T.line, borderWidth: 1, borderRadius: radii.card,
-        padding: 10, justifyContent: 'space-between',
-        // A real offset and blur. A zero-offset halo is decoration, not depth.
-        shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
-      }}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Text style={{ color: k.tint, fontSize: 13 }}>{k.glyph}</Text>
-        {/* Container count as a fact, not a chart. `null` means never deployed. */}
-        <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 9.5 }}>
+    <div style={{ ...card, ...(n.system ? { background: T.raised } : {}) }}>
+      <Handle type="target" position={Position.Left} style={{ background: T.line2, width: 7, height: 7 }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ color: k.tint, fontSize: 14 }}>{k.glyph}</span>
+        <span style={{ color: T.faint, fontFamily: T.mono, fontSize: 10 }}>
           {n.containers === null ? '—' : `×${n.containers}`}
-        </Text>
-      </View>
-
-      <View>
-        <Text numberOfLines={1} style={{ color: T.text, fontWeight: '700', fontSize: 12.5 }}>{n.name}</Text>
-        <Text numberOfLines={1} style={{ color: T.faint, fontSize: 10, marginTop: 1 }}>{n.typeName}</Text>
-      </View>
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-        <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: statusTint(n.status) }} />
-        <Text numberOfLines={1} style={{ color: statusTint(n.status), fontFamily: T.mono, fontSize: 8.5, letterSpacing: 0.4 }}>
-          {n.status}
-        </Text>
-        {n.ha && <Text style={{ color: T.ok, fontFamily: T.mono, fontSize: 8.5 }}>HA</Text>}
-        {n.publicHttp && <Text style={{ color: T.accentBlue, fontFamily: T.mono, fontSize: 8.5 }}>www</Text>}
-      </View>
-    </View>
+        </span>
+      </div>
+      <div style={{ color: T.text, fontWeight: 700, fontSize: 13.5, marginTop: 8 }}>{n.name}</div>
+      <div style={{ color: T.faint, fontSize: 10.5 }}>{n.typeName}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 8 }}>
+        <span style={{ width: 6, height: 6, borderRadius: 3, background: statusTint(n.status) }} />
+        <span style={{ color: statusTint(n.status), fontFamily: T.mono, fontSize: 9, letterSpacing: 0.4 }}>{n.status}</span>
+        {n.ha && <span style={{ color: T.ok, fontFamily: T.mono, fontSize: 9 }}>HA</span>}
+        {n.publicHttp && <span style={{ color: T.accentBlue, fontFamily: T.mono, fontSize: 9 }}>www</span>}
+      </div>
+      <Handle type="source" position={Position.Right} style={{ background: T.line2, width: 7, height: 7 }} />
+    </div>
   );
 }
 
-function GhostTile({ g }: { g: Ghost }) {
+function GhostNode({ data }: NodeProps) {
+  const g = data['ghost'] as Ghost;
+  const added = data['added'] === true;
   const weak = g.confidence === 'likely';
-  const tint = weak ? T.warn : T.err;
+  const tint = added ? T.primary : weak ? T.warn : T.err;
   return (
-    <View
-      style={{
-        width: TILE_W, height: TILE_H,
-        backgroundColor: 'transparent',
-        borderColor: tint, borderWidth: 1, borderStyle: 'dashed', borderRadius: radii.card,
-        padding: 10, justifyContent: 'space-between',
-      }}
-    >
-      <Text style={{ color: tint, fontSize: 13 }}>◌</Text>
-      <View>
-        <Text numberOfLines={1} style={{ color: T.text, fontWeight: '700', fontSize: 12.5 }}>{g.type}</Text>
-        <Text numberOfLines={1} style={{ color: tint, fontSize: 10, marginTop: 1 }}>
-          {weak ? 'maybe missing' : 'missing'}
-        </Text>
-      </View>
-      <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 8.5, letterSpacing: 0.4 }}>NOT PROVISIONED</Text>
-    </View>
+    <div style={{ ...card, background: 'transparent', border: `1px dashed ${tint}`, boxShadow: 'none' }}>
+      <Handle type="target" position={Position.Left} style={{ background: tint, width: 7, height: 7 }} />
+      <div style={{ color: tint, fontSize: 14 }}>◌</div>
+      <div style={{ color: T.text, fontWeight: 700, fontSize: 13.5, marginTop: 8 }}>{g.type}</div>
+      <div style={{ color: tint, fontSize: 10.5 }}>{added ? 'added by you' : weak ? 'maybe missing' : 'missing'}</div>
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 9, letterSpacing: 0.4, marginTop: 8 }}>
+        NOT PROVISIONED
+      </div>
+    </div>
   );
 }
 
-/* -------------------------------------------------------------- container */
-
-const PAD = 16;
-const HEAD = 34;
-
-const rowsFor = (count: number) => Math.max(1, Math.ceil(count / PER_ROW));
-const gridHeight = (count: number) => rowsFor(count) * TILE_H + (rowsFor(count) - 1) * TILE_GAP;
-
-/**
- * Border-box, and the two pixels are load-bearing.
- *
- * React Native measures `width` inclusive of padding AND border, so a container sized to
- * `padding + tiles` is 2px too narrow once its 1px border is charged to the same budget. At
- * four 108px tiles that left 466px of room for 468px of content: the fourth tile wrapped, the
- * grid needed a row it had not been given, and the last tile — always a ghost, always the
- * finding — hung outside the container's bottom edge.
- */
-const BORDER = 1;
-
-function projectSize(count: number) {
-  const cols = Math.min(Math.max(count, 1), PER_ROW);
-  return {
-    w: BORDER * 2 + PAD * 2 + cols * TILE_W + (cols - 1) * TILE_GAP,
-    h: BORDER * 2 + PAD * 2 + HEAD + gridHeight(count),
-  };
-}
-
-/** Centre of tile `i` in the wrapped grid, relative to the container's padding box. */
-const tileCentre = (i: number) => ({
-  x: PAD + (i % PER_ROW) * (TILE_W + TILE_GAP) + TILE_W / 2,
-  y: PAD + HEAD + Math.floor(i / PER_ROW) * (TILE_H + TILE_GAP) + TILE_H / 2,
-});
-
-/**
- * Where each tile sits, and the fact that you can move it.
- *
- * The grid is only a STARTING arrangement. Anybody reading an architecture diagram wants to
- * pull the thing they care about into the middle and push the noise to the edge, and a diagram
- * you cannot rearrange is a picture rather than a tool. So every tile is draggable, the edges
- * follow the tiles rather than the grid, and the arrangement is remembered per project — you
- * come back tomorrow to the layout you left.
- *
- * A movement THRESHOLD separates a drag from a click: without one, every press nudges a card a
- * pixel or two and the board slowly falls out of alignment just from being used.
- */
-const DRAG_THRESHOLD = 3;
-
-interface Tile {
-  key: string;
-  kind: 'service' | 'ghost';
-  node?: ArchNode;
-  ghost?: Ghost;
-  /** What `wiring` calls this, so an edge can find its tile. */
-  type: string;
-}
-
-function layoutKey(projectId: string): string {
-  return `notch.layout.${projectId}`;
-}
-
-function loadLayout(projectId: string): Record<string, XY> {
-  try {
-    const raw = globalThis.localStorage?.getItem(layoutKey(projectId));
-    return raw === null || raw === undefined ? {} : JSON.parse(raw) as Record<string, XY>;
-  } catch { return {}; }
-}
-
-function saveLayout(projectId: string, pos: Record<string, XY>): void {
-  try { globalThis.localStorage?.setItem(layoutKey(projectId), JSON.stringify(pos)); } catch { /* private mode */ }
-}
-
-interface XY { x: number; y: number }
-
-function DraggableTile({
-  tile, at, onMove, onGrab, onDrop,
-}: {
-  tile: Tile; at: XY;
-  onMove: (k: string, p: XY) => void;
-  onGrab: (k: string) => void;
-  onDrop: () => void;
-}) {
-  /*
-   * The responder is created ONCE and reads everything through refs.
-   *
-   * A first version rebuilt it with `useMemo` whenever the tile's position changed — which is
-   * every frame of a drag. Each rebuild handed react-native-web a different responder object
-   * mid-gesture, the gesture was dropped after the first move, and a 260px drag moved the card
-   * 19px. Gesture handlers have to outlive the values they act on.
-   */
-  const atRef = useRef(at);
-  atRef.current = at;
-  const origin = useRef<XY>(at);
-  const cb = useRef({ onMove, onGrab, onDrop });
-  cb.current = { onMove, onGrab, onDrop };
-
-  const pan = useRef(PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    // Claim the gesture only once it is actually a drag, so a tap stays a tap.
-    onMoveShouldSetPanResponder: (_e, g) =>
-      Math.abs(g.dx) > DRAG_THRESHOLD || Math.abs(g.dy) > DRAG_THRESHOLD,
-    onPanResponderGrant: () => { origin.current = atRef.current; cb.current.onGrab(tile.key); },
-    onPanResponderMove: (_e, g) => {
-      // Clamped at zero: a tile dragged past the top-left would sit outside the container and
-      // become unreachable, since the canvas only scrolls in the positive direction.
-      cb.current.onMove(tile.key, {
-        x: Math.max(0, origin.current.x + g.dx),
-        y: Math.max(0, origin.current.y + g.dy),
-      });
-    },
-    onPanResponderRelease: () => cb.current.onDrop(),
-    onPanResponderTerminate: () => cb.current.onDrop(),
-    onPanResponderTerminationRequest: () => false,
-  })).current;
-
+function RepoNode({ data }: NodeProps) {
+  const r = data['repo'] as NonNullable<Board['repo']>;
+  const leaf = r.dir.split('/').filter(Boolean).pop() ?? r.dir;
   return (
-    <View
-      {...pan.panHandlers}
-      style={{ position: 'absolute', left: at.x, top: at.y, cursor: 'grab' } as object}
-    >
-      {tile.kind === 'service' && tile.node !== undefined
-        ? <ServiceTile n={tile.node} />
-        : tile.ghost !== undefined ? <GhostTile g={tile.ghost} /> : null}
-    </View>
+    <div style={{ ...card, width: 232 }}>
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 9, letterSpacing: 0.6 }}>REPOSITORY</div>
+      <div style={{ color: T.text, fontWeight: 700, fontSize: 14, marginTop: 4 }}>{leaf}</div>
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 10, marginTop: 2 }}>
+        {r.scanned.join(' · ') || 'no manifests'}
+      </div>
+      <div style={{ height: 1, background: T.line, margin: '10px 0' }} />
+      <div style={{ display: 'flex', gap: 14, fontSize: 11.5 }}>
+        <span style={{ color: T.dim }}>● {r.satisfied} satisfied</span>
+        <span style={{ color: r.missing > 0 ? T.err : T.dim }}>● {r.missing} missing</span>
+      </div>
+      <Handle type="source" position={Position.Right} style={{ background: T.line2, width: 7, height: 7 }} />
+    </div>
   );
 }
 
-function ProjectGroup({
-  projectId, name, status, nodes, ghosts, wiring, onSize,
-}: {
-  projectId: string; name: string; status: string;
-  nodes: ArchNode[]; ghosts: Ghost[]; wiring: Wiring | null;
-  /** The container tells the canvas how big it has become, so nothing gets clipped. */
-  onSize: (s: { w: number; h: number }) => void;
-}) {
-  const tint = statusTint(status);
+const nodeTypes = { service: ServiceNode, ghost: GhostNode, repo: RepoNode };
 
-  const tiles: Tile[] = useMemo(() => [
-    ...nodes.map((n) => ({
-      key: `s:${n.id}`, kind: 'service' as const, node: n,
-      type: n.typeName.toLowerCase().replace(/[^a-z0-9]/g, ''),
-    })),
-    ...ghosts.map((g) => ({ key: `g:${g.type}`, kind: 'ghost' as const, ghost: g, type: g.type.toLowerCase() })),
-  ], [nodes, ghosts]);
+/* --------------------------------------------------------------- palette */
 
-  /*
-   * Saved positions win; anything new falls into the next free grid slot. A service
-   * provisioned after you arranged the board should appear somewhere sensible without
-   * disturbing the arrangement you made.
-   */
-  const [pos, setPos] = useState<Record<string, XY>>({});
-  const [dragging, setDragging] = useState<string | null>(null);
+/** What you can add by hand — the same closed vocabulary the agent proposes from. */
+const PALETTE: ReadonlyArray<{
+  group: string;
+  items: ReadonlyArray<{ type: string; label: string; note: string; kind: keyof typeof KIND }>;
+}> = [
+  { group: 'Runtimes', items: [
+    { type: 'nodejs', label: 'Node.js', note: 'Runs your JavaScript or TypeScript app', kind: 'runtime' },
+    { type: 'python', label: 'Python', note: 'Runs a Python app', kind: 'runtime' },
+    { type: 'go', label: 'Go', note: 'Runs a compiled Go binary', kind: 'runtime' },
+    { type: 'php', label: 'PHP', note: 'Runs a PHP app', kind: 'runtime' },
+    { type: 'rust', label: 'Rust', note: 'Runs a compiled Rust binary', kind: 'runtime' },
+    { type: 'static', label: 'Static', note: 'Serves built files, no runtime', kind: 'runtime' },
+  ] },
+  { group: 'Databases', items: [
+    { type: 'postgresql', label: 'PostgreSQL', note: 'Relational database', kind: 'database' },
+    { type: 'mariadb', label: 'MariaDB', note: 'MySQL-compatible database', kind: 'database' },
+    { type: 'clickhouse', label: 'ClickHouse', note: 'Columnar analytics database', kind: 'database' },
+  ] },
+  { group: 'Cache & search', items: [
+    { type: 'valkey', label: 'Valkey', note: 'Redis-compatible cache and sessions', kind: 'cache' },
+    { type: 'meilisearch', label: 'Meilisearch', note: 'Full-text search', kind: 'search' },
+    { type: 'typesense', label: 'Typesense', note: 'Typo-tolerant search', kind: 'search' },
+    { type: 'elasticsearch', label: 'Elasticsearch', note: 'Search and log analytics', kind: 'search' },
+    { type: 'qdrant', label: 'Qdrant', note: 'Vector database for embeddings', kind: 'search' },
+  ] },
+  { group: 'Messaging & storage', items: [
+    { type: 'nats', label: 'NATS', note: 'Message queue for background jobs', kind: 'queue' },
+    { type: 'kafka', label: 'Kafka', note: 'Event streaming', kind: 'queue' },
+    { type: 'objectstorage', label: 'Object storage', note: 'S3-compatible buckets', kind: 'storage' },
+  ] },
+];
 
-  useEffect(() => {
-    const saved = loadLayout(projectId);
-    setPos(() => {
-      const next: Record<string, XY> = {};
-      tiles.forEach((t, i) => { next[t.key] = saved[t.key] ?? tileCentre(i); });
-      return next;
-    });
-  }, [projectId, tiles]);
-
-  const move = useCallback((k: string, p: XY) => {
-    setPos((cur) => ({ ...cur, [k]: p }));
-  }, []);
-
-  // Written on release rather than on every frame: a drag fires dozens of updates a second and
-  // localStorage is synchronous.
-  useEffect(() => {
-    if (dragging !== null || Object.keys(pos).length === 0) return;
-    saveLayout(projectId, pos);
-  }, [dragging, pos, projectId]);
-
-  const reset = () => {
-    const next: Record<string, XY> = {};
-    tiles.forEach((t, i) => { next[t.key] = tileCentre(i); });
-    setPos(next);
-    saveLayout(projectId, next);
-  };
-
-  const centreOf = (k: string): XY => {
-    const p = pos[k] ?? { x: 0, y: 0 };
-    return { x: p.x + TILE_W / 2, y: p.y + TILE_H / 2 };
-  };
-
-  const byType = (type: string): Tile | undefined => {
-    const t = type.toLowerCase();
-    return tiles.find((x) => x.type.includes(t) || t.includes(x.type));
-  };
-
-  const runtimeTile = wiring?.runtime === undefined || wiring?.runtime === null ? undefined : byType(wiring.runtime);
-  const wires = runtimeTile === undefined || wiring === null ? [] : wiring.edges.flatMap((e) => {
-    const target = byType(e.to);
-    if (target === undefined || target.key === runtimeTile.key) return [];
-    return [{
-      key: `${e.from}-${e.to}`,
-      a: centreOf(runtimeTile.key), b: centreOf(target.key),
-      colour: !e.deployed ? T.err : e.confidence === 'likely' ? T.warn : T.thread,
-      dashed: !e.deployed,
-    }];
-  });
-
-  // The container grows to hold wherever the tiles have been put.
-  const extent = Object.values(pos).reduce(
-    (m, p) => ({ w: Math.max(m.w, p.x + TILE_W), h: Math.max(m.h, p.y + TILE_H) }),
-    { w: TILE_W, h: TILE_H });
-  /*
-   * No padding on the container, because the tiles are absolutely positioned.
-   *
-   * React Native lays absolute children out against the PADDING box, so a container with
-   * `padding: 16` shifted every tile another 16px in — the coordinates already include it, and
-   * the bottom row hung outside the border. The header carries its own padding instead and the
-   * tile coordinates are the single source of position.
-   */
-  const width = extent.w + PAD + BORDER * 2;
-  // Bottom room equal to the left inset, so the last row is not shaved by the border.
-  const height = extent.h + PAD * 2 + BORDER * 2;
-
-  /*
-   * Tell the canvas how big this got.
-   *
-   * react-native-web puts `overflow: hidden` on every View, and the canvas above was sized
-   * from the ORIGINAL grid — so the moment a tile was dragged past the starting bounds the
-   * container was silently cropped by its own parent. Dragging is the whole feature; the
-   * canvas has to grow with it.
-   */
-  useEffect(() => { onSize({ w: width, h: height }); }, [width, height, onSize]);
+function AddPalette({
+  onAdd, onClose, existing,
+}: { onAdd: (type: string) => void; onClose: () => void; existing: ReadonlySet<string> }) {
+  const [q, setQ] = useState('');
+  const needle = q.trim().toLowerCase();
+  const groups = PALETTE
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => needle === ''
+        || i.label.toLowerCase().includes(needle)
+        || i.type.includes(needle)
+        || i.note.toLowerCase().includes(needle)),
+    }))
+    .filter((g) => g.items.length > 0);
 
   return (
-    <View
-      style={{
-        width, height,
-        backgroundColor: '#151515',
-        borderColor: ghosts.length > 0 ? '#3a2328' : T.line,
-        borderWidth: BORDER, borderRadius: 18,
-      }}
-    >
-      <View style={{
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-        height: HEAD, paddingHorizontal: PAD, paddingTop: PAD,
-      }}>
-        <Text style={{ color: T.text, fontWeight: '700', fontSize: 13.5 }}>{name}</Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Text
-            onPress={reset}
-            style={{
-              color: T.dim, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.4,
-              backgroundColor: T.raised, borderColor: T.line, borderWidth: 1,
-              borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 2, overflow: 'hidden',
-            }}
-          >
-            TIDY UP
-          </Text>
-          {ghosts.length > 0 && (
-            <View style={{ backgroundColor: '#2a1a1e', borderColor: '#4a2b32', borderWidth: 1, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 2 }}>
-              <Text style={{ color: T.err, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.4 }}>
-                {ghosts.length} MISSING
-              </Text>
-            </View>
-          )}
-          <View style={{ backgroundColor: T.raised, borderColor: T.line, borderWidth: 1, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 2 }}>
-            <Text style={{ color: tint, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.4 }}>{status}</Text>
-          </View>
-        </View>
-      </View>
-
-      {/* Behind the cards, and following them: the edges the code claims. */}
-      {wires.length > 0 && (
-        <View pointerEvents="none" style={{ position: 'absolute', left: BORDER, top: BORDER }}>
-          <Svg width={width} height={height}>
-            {wires.map((w) => {
-              const dx = Math.max(28, Math.abs(w.b.x - w.a.x) * 0.45);
-              const d = `M ${w.a.x} ${w.a.y} C ${w.a.x + dx} ${w.a.y}, ${w.b.x - dx} ${w.b.y}, ${w.b.x} ${w.b.y}`;
+    <div style={{
+      position: 'absolute', left: 60, top: 16, zIndex: 20, width: 340, maxHeight: '78%',
+      display: 'flex', flexDirection: 'column',
+      background: '#161616', border: `1px solid ${T.line}`, borderRadius: 14,
+      boxShadow: '0 24px 60px rgba(0,0,0,.6)', overflow: 'hidden', fontFamily: SANS,
+    }}>
+      <div style={{ padding: '14px 16px 10px' }}>
+        <div style={{ color: T.text, fontWeight: 700, fontSize: 14 }}>Add a service</div>
+        <div style={{ color: T.faint, fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>
+          Click to place it on the board. Nothing is created until you confirm the import file.
+        </div>
+      </div>
+      <div style={{ padding: '0 12px 10px' }}>
+        <input
+          autoFocus value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Search services…"
+          style={{
+            width: '100%', boxSizing: 'border-box', background: T.raised, color: T.text,
+            border: `1px solid ${T.line}`, borderRadius: 8, padding: '9px 11px', fontSize: 13, outline: 'none',
+          }}
+        />
+      </div>
+      <div style={{ overflowY: 'auto', padding: '0 8px 10px' }}>
+        {groups.length === 0 && (
+          <div style={{ color: T.faint, fontSize: 12.5, padding: '10px 8px' }}>
+            Nothing matches “{q}”. Zerops has no service by that name.
+          </div>
+        )}
+        {groups.map((g) => (
+          <div key={g.group}>
+            <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.7, padding: '10px 8px 6px' }}>
+              {g.group.toUpperCase()} ({g.items.length})
+            </div>
+            {g.items.map((i) => {
+              const already = existing.has(i.type);
               return (
-                <Path key={w.key} d={d} stroke={w.colour} strokeWidth={1.4} fill="none"
-                  opacity={w.dashed ? 0.55 : 0.75}
-                  strokeDasharray={w.dashed ? '4 4' : undefined} strokeLinecap="round" />
+                <div
+                  key={i.type}
+                  onClick={() => { if (!already) { onAdd(i.type); onClose(); } }}
+                  onMouseEnter={(e) => { if (!already) e.currentTarget.style.background = T.raised; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                  style={{
+                    display: 'flex', gap: 11, alignItems: 'center', padding: 8,
+                    borderRadius: 9, cursor: already ? 'default' : 'pointer', opacity: already ? 0.45 : 1,
+                  }}
+                >
+                  <span style={{
+                    width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+                    background: `${kindOf(i.kind).tint}1f`, color: kindOf(i.kind).tint,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
+                  }}>{kindOf(i.kind).glyph}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <div style={{ color: T.text, fontSize: 13, fontWeight: 600 }}>
+                      {i.label}{already ? ' · already here' : ''}
+                    </div>
+                    <div style={{
+                      color: T.faint, fontSize: 11, whiteSpace: 'nowrap',
+                      overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>{i.note}</div>
+                  </span>
+                </div>
               );
             })}
-          </Svg>
-        </View>
-      )}
-
-      <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}>
-        {tiles.map((t) => (
-          <DraggableTile
-            key={t.key}
-            tile={t}
-            at={pos[t.key] ?? { x: 0, y: 0 }}
-            onMove={move}
-            onGrab={setDragging}
-            onDrop={() => setDragging(null)}
-          />
+          </div>
         ))}
-      </View>
-    </View>
+      </div>
+      <div
+        onClick={onClose}
+        style={{ borderTop: `1px solid ${T.line}`, padding: '9px 16px', color: T.faint, fontSize: 11.5, cursor: 'pointer' }}
+      >
+        Close
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------- left rail */
+
+type Tool = 'select' | 'pan';
+
+/** Rail glyphs, drawn — 16px line art at a single 1.7 weight so the column reads as one set. */
+function RailIcon({ name }: { name: 'cursor' | 'hand' | 'plus' | 'zoomIn' | 'zoomOut' | 'fit' }) {
+  const p = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  return (
+    <svg width={16} height={16} viewBox="0 0 20 20" aria-hidden>
+      {name === 'cursor' && <path {...p} d="M4 3 L4 15.5 L7.6 12.2 L10 17 L12.2 15.9 L9.9 11.2 L14.6 11 Z" />}
+      {name === 'hand' && (
+        <path {...p} d="M7 9.5V4.6a1.1 1.1 0 0 1 2.2 0v4.2m0-.6V3.6a1.1 1.1 0 0 1 2.2 0v5m0-.8V5.1a1.1 1.1 0 0 1 2.2 0v6.3c0 3.1-2 5.3-4.8 5.3-2.4 0-3.7-1.2-5-3.6L2.8 11c-.5-.9.6-2 1.6-1.3L7 12" />
+      )}
+      {name === 'plus' && <path {...p} d="M10 4.5v11M4.5 10h11" />}
+      {name === 'zoomIn' && <><circle {...p} cx="8.8" cy="8.8" r="5.3" /><path {...p} d="M12.7 12.7 17 17M6.8 8.8h4M8.8 6.8v4" /></>}
+      {name === 'zoomOut' && <><circle {...p} cx="8.8" cy="8.8" r="5.3" /><path {...p} d="M12.7 12.7 17 17M6.8 8.8h4" /></>}
+      {name === 'fit' && <path {...p} d="M3 7V3.8A.8.8 0 0 1 3.8 3H7m6 0h3.2a.8.8 0 0 1 .8.8V7m0 6v3.2a.8.8 0 0 1-.8.8H13M7 17H3.8a.8.8 0 0 1-.8-.8V13" />}
+    </svg>
   );
 }
 
 /* ------------------------------------------------------------------ board */
 
-/**
- * The connector.
- *
- * A cubic bezier with horizontal control points, so it leaves one card and arrives at the
- * other travelling sideways — the shape a wire takes on a board, rather than a diagonal line
- * drawn between two points.
- */
-function Connector({ from, to, tint }: { from: { x: number; y: number }; to: { x: number; y: number }; tint: string }) {
-  const dx = Math.max(48, Math.abs(to.x - from.x) * 0.6);
-  const d = `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
-  return (
-    <>
-      <Path d={d} stroke={tint} strokeWidth={1.5} fill="none" strokeLinecap="round" opacity={0.75} />
-      {/* Endpoints, so the wire reads as attached rather than passing behind. */}
-      <Circle cx={from.x} cy={from.y} r={3} fill={tint} />
-      <Circle cx={to.x} cy={to.y} r={3} fill={tint} />
-    </>
-  );
+const COL = 250;
+const ROW = 150;
+
+interface CanvasProps {
+  board: Board;
+  onAdd: (t: string) => void;
+  /** The board's one primary action: turn everything dashed into an import file. */
+  onProvision: () => void;
+  busy: boolean;
 }
 
-const REPO_W = 268;
+function Inner({ board, onAdd, onProvision, busy }: CanvasProps) {
+  const { graph, ghosts, repo, wiring, added } = board;
+  const { fitView, zoomIn, zoomOut } = useReactFlow();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [tool, setTool] = useState<Tool>('select');
 
-export function ArchCanvas({ board }: { board: Board }) {
-  const { graph, ghosts, repo } = board;
+  /**
+   * Saved positions win, so an arrangement survives a rescan and a restart.
+   *
+   * Read SYNCHRONOUSLY, not in an effect: the layout has to be in hand before the first
+   * `initial` is computed, and an effect runs after it. Done the other way the saved
+   * arrangement is ignored on load and only reappears if something later happens to
+   * invalidate the memo — which is the kind of bug that looks like flakiness.
+   */
+  const saved = useRef<{ pid: string; at: Record<string, { x: number; y: number }> }>({ pid: '', at: {} });
+  if (saved.current.pid !== graph.projectId) {
+    let at: Record<string, { x: number; y: number }> = {};
+    try {
+      const raw = globalThis.localStorage?.getItem(`notch.flow.${graph.projectId}`);
+      if (raw !== null && raw !== undefined) at = JSON.parse(raw) as typeof at;
+    } catch { at = {}; }
+    saved.current = { pid: graph.projectId, at };
+  }
 
-  // Starts as the grid's size and follows the container once tiles are moved.
-  const [groupSize, setGroupSize] = useState(() => projectSize(graph.nodes.length + ghosts.length));
-  const onSize = useCallback((s: { w: number; h: number }) => {
-    setGroupSize((cur) => (cur.w === s.w && cur.h === s.h ? cur : s));
-  }, []);
+  const initial = useMemo<Node[]>(() => {
+    const out: Node[] = [];
+    const at = (id: string, x: number, y: number) => saved.current.at[id] ?? { x, y };
+    if (repo !== null) out.push({ id: 'repo', type: 'repo', position: at('repo', 0, 200), data: { repo } });
 
-  const layout = useMemo(() => {
-    const size = groupSize;
-    const repoH = repo === null ? 0 : 116;
-    const gapX = 96;
+    const runtimeIdx = graph.nodes.findIndex((n) => n.kind === 'runtime');
+    let row = 0;
+    graph.nodes.forEach((n, i) => {
+      const isRuntime = i === runtimeIdx;
+      const x = isRuntime ? 340 : 340 + COL;
+      const y = isRuntime ? 200 : row++ * ROW;
+      out.push({ id: `s:${n.id}`, type: 'service', position: at(`s:${n.id}`, x, y), data: { node: n } });
+    });
+    ghosts.forEach((g) => out.push({
+      id: `g:${g.type}`, type: 'ghost',
+      position: at(`g:${g.type}`, 340 + COL, row++ * ROW),
+      data: { ghost: g, added: added.includes(g.type) },
+    }));
+    return out;
+  }, [graph, ghosts, repo, added]);
 
-    // Repo on the left, the project it was measured against on the right. With no scan there
-    // is nothing on the left and the project sits where the eye starts.
-    const projX = repo === null ? 0 : REPO_W + gapX;
-    const projY = 0;
-    const repoY = Math.max(0, (size.h - repoH) / 2);
+  const [nodes, setNodes] = useState<Node[]>(initial);
+  useEffect(() => { setNodes(initial); }, [initial]);
 
-    return {
-      size, repoH, projX, projY, repoY,
-      width: projX + size.w,
-      height: Math.max(size.h, repoY + repoH),
-      // Connector endpoints: the right edge of the repo card, the left edge of the container.
-      from: { x: REPO_W, y: repoY + repoH / 2 },
-      to: { x: projX, y: projY + size.h / 2 },
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    setNodes((cur) => {
+      const next = applyNodeChanges(changes, cur);
+      // Remember the arrangement, but only once a drag has FINISHED: a drag fires dozens of
+      // changes a second and localStorage is synchronous.
+      if (changes.some((c) => c.type === 'position' && c.dragging === false)) {
+        const map: Record<string, { x: number; y: number }> = {};
+        for (const n of next) map[n.id] = n.position;
+        saved.current = { pid: graph.projectId, at: map };
+        try {
+          globalThis.localStorage?.setItem(`notch.flow.${graph.projectId}`, JSON.stringify(map));
+        } catch { /* private mode */ }
+      }
+      return next;
+    });
+  }, [graph.projectId]);
+
+  const edges = useMemo<Edge[]>(() => {
+    const out: Edge[] = [];
+    const idFor = (type: string): string | null => {
+      const t = type.toLowerCase();
+      const svc = graph.nodes.find((n) => {
+        const k = n.typeName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return k.includes(t) || t.includes(k) || n.name.toLowerCase() === t;
+      });
+      if (svc !== undefined) return `s:${svc.id}`;
+      const gh = ghosts.find((g) => g.type.toLowerCase() === t);
+      return gh === undefined ? null : `g:${gh.type}`;
     };
-  }, [groupSize, repo]);
 
-  const verdictTint = ghosts.length > 0 ? T.err : T.ok;
+    const rt = wiring?.runtime === undefined || wiring?.runtime === null ? null : idFor(wiring.runtime);
+    if (repo !== null && rt !== null) {
+      out.push({
+        id: 'repo->runtime', source: 'repo', target: rt, animated: true,
+        style: { stroke: repo.missing > 0 ? T.err : T.ok, strokeWidth: 1.6 },
+        label: 'scanned', labelStyle: { fill: T.faint, fontSize: 10 }, labelBgStyle: { fill: T.bg },
+      });
+    }
+    for (const e of wiring?.edges ?? []) {
+      const to = idFor(e.to);
+      if (rt === null || to === null || to === rt) continue;
+      out.push({
+        id: `w:${e.to}`, source: rt, target: to, animated: e.deployed,
+        style: {
+          stroke: !e.deployed ? T.err : e.confidence === 'likely' ? T.warn : T.thread,
+          strokeWidth: 1.4, strokeDasharray: e.deployed ? undefined : '5 4',
+        },
+        label: e.found,
+        labelStyle: { fill: T.faint, fontSize: 9.5, fontFamily: T.mono },
+        labelBgStyle: { fill: T.bg, fillOpacity: 0.85 },
+      });
+    }
+    return out;
+  }, [graph.nodes, ghosts, repo, wiring]);
+
+  const existing = useMemo(
+    () => new Set([...graph.nodes.map((n) => n.typeName.toLowerCase()), ...ghosts.map((g) => g.type)]),
+    [graph.nodes, ghosts]);
+
+  const btn = (on: boolean): React.CSSProperties => ({
+    width: 34, height: 34, borderRadius: 9, display: 'flex', alignItems: 'center',
+    justifyContent: 'center', border: `1px solid ${on ? T.bright : T.line}`,
+    background: on ? T.bright : T.panel, color: on ? T.onBright : T.dim, cursor: 'pointer',
+  });
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: T.bg }} contentContainerStyle={{ padding: 28 }}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <View style={{ width: layout.width, height: layout.height }}>
-          {repo !== null && (
-            <>
-              {/*
-                An explicit pixel size on <Svg>, and a solid stroke.
-                "100%" left the canvas zero-sized in react-native-svg's web build, and a
-                `url(#…)` gradient reference did not resolve there either — between them the
-                connector rendered as nothing at all, with no error. Concrete numbers and a
-                plain colour draw.
-              */}
-              <View style={{ position: 'absolute', left: 0, top: 0 }} pointerEvents="none">
-                <Svg width={layout.width} height={layout.height}>
-                  <Connector from={layout.from} to={layout.to} tint={verdictTint} />
-                </Svg>
-              </View>
+    <div style={{ position: 'absolute', inset: 0, background: T.bg }}>
+      {/*
+        Four rules React Flow's own stylesheet owns and this palette needs back: a tile that
+        lifts while you hold it, a marquee in Notch violet rather than the default blue, a
+        selected tile ringed instead of recoloured, and a grab cursor over empty canvas so the
+        pan tool looks like what it does.
+      */}
+      <style>{`
+        .react-flow__node { transition: box-shadow 140ms ease, transform 60ms ease; }
+        .react-flow__node.dragging > div {
+          box-shadow: 0 18px 40px rgba(0,0,0,.65) !important;
+          transform: scale(1.02);
+        }
+        .react-flow__node.selected > div { border-color: ${T.primary} !important; }
+        .react-flow__selection {
+          background: ${T.primary}1a; border: 1px solid ${T.primary};
+        }
+        .react-flow__pane.draggable { cursor: grab; }
+        .react-flow__pane.dragging { cursor: grabbing; }
+      `}</style>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        nodeTypes={nodeTypes}
+        fitView
+        fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
+        minZoom={0.2}
+        maxZoom={1.8}
+        proOptions={{ hideAttribution: true }}
+        /*
+         * Two drag meanings, one gesture, so the tool has to say which. In select, dragging
+         * empty canvas draws a marquee and the middle button still pans; in pan, dragging
+         * anywhere moves the board. Nodes drag in both — that never becomes modal.
+         */
+        panOnDrag={tool === 'pan' ? true : [1, 2]}
+        selectionOnDrag={tool === 'select'}
+        onDoubleClick={() => setPaletteOpen(true)}
+      >
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1.6} color="#303030" />
+      </ReactFlow>
 
-              <View style={{ position: 'absolute', left: 0, top: layout.repoY, width: REPO_W }}>
-                <RepoCard repo={repo} missing={ghosts.length} />
-              </View>
-            </>
-          )}
+      {/* The rail: what to add, how to point, how to frame. */}
+      <div style={{
+        position: 'absolute', left: 12, top: 16, display: 'flex',
+        flexDirection: 'column', gap: 6, zIndex: 15,
+      }}>
+        <div title="Add a service" onClick={() => setPaletteOpen((v) => !v)} style={btn(paletteOpen)}>
+          <RailIcon name="plus" />
+        </div>
+        <div style={{ height: 7 }} />
+        <div title="Select" onClick={() => setTool('select')} style={btn(tool === 'select')}>
+          <RailIcon name="cursor" />
+        </div>
+        <div title="Pan" onClick={() => setTool('pan')} style={btn(tool === 'pan')}>
+          <RailIcon name="hand" />
+        </div>
+        <div style={{ height: 7 }} />
+        <div title="Zoom in" onClick={() => void zoomIn({ duration: 160 })} style={btn(false)}>
+          <RailIcon name="zoomIn" />
+        </div>
+        <div title="Zoom out" onClick={() => void zoomOut({ duration: 160 })} style={btn(false)}>
+          <RailIcon name="zoomOut" />
+        </div>
+        <div title="Fit to view" onClick={() => void fitView({ padding: 0.25, duration: 250 })} style={btn(false)}>
+          <RailIcon name="fit" />
+        </div>
+      </div>
 
-          <View style={{ position: 'absolute', left: layout.projX, top: layout.projY }}>
-            <ProjectGroup
-              projectId={graph.projectId}
-              name={graph.projectName}
-              status={graph.status}
-              nodes={graph.nodes}
-              ghosts={ghosts}
-              wiring={board.wiring}
-              onSize={onSize}
-            />
-          </View>
-        </View>
-      </ScrollView>
-    </ScrollView>
+      {paletteOpen && <AddPalette existing={existing} onClose={() => setPaletteOpen(false)} onAdd={onAdd} />}
+
+      {/* Which project you are looking at, without stealing a header row from the canvas. */}
+      <div style={{
+        position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 12,
+        display: 'flex', alignItems: 'center', gap: 9, padding: '7px 14px',
+        background: T.panel, border: `1px solid ${T.line}`, borderRadius: 999,
+        boxShadow: '0 8px 24px rgba(0,0,0,.5)', fontFamily: SANS, pointerEvents: 'none',
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: 3, background: statusTint(graph.status) }} />
+        <span style={{ color: T.text, fontSize: 12.5, fontWeight: 600 }}>{graph.projectName}</span>
+        <span style={{ color: T.faint, fontFamily: T.mono, fontSize: 10.5 }}>
+          {graph.nodes.length} live{ghosts.length > 0 ? ` · ${ghosts.length} missing` : ''}
+        </span>
+      </div>
+
+      {/* One primary action, and only when there is something to act on. */}
+      {ghosts.length > 0 && (
+        <div
+          onClick={() => { if (!busy) onProvision(); }}
+          style={{
+            position: 'absolute', right: 18, bottom: 18, zIndex: 12,
+            padding: '11px 18px', borderRadius: 11, cursor: busy ? 'default' : 'pointer',
+            background: busy ? T.raised : T.bright, color: busy ? T.dim : T.onBright,
+            fontFamily: SANS, fontSize: 13, fontWeight: 700,
+            boxShadow: '0 10px 30px rgba(0,0,0,.55)',
+          }}
+        >
+          {busy ? 'Working…' : `Provision ${ghosts.length} service${ghosts.length === 1 ? '' : 's'}`}
+        </div>
+      )}
+
+      {/*
+        Nothing scanned yet: say what to do next.
+
+        Centred only when the canvas is genuinely empty. With services on the board it moves to
+        the corner, because an instruction printed across the diagram is worse than no
+        instruction — it reads as a caption on the tiles it is covering.
+      */}
+      {repo === null && ghosts.length === 0 && (nodes.length === 0 ? (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', pointerEvents: 'none',
+        }}>
+          <div style={{ textAlign: 'center', color: T.faint, fontSize: 13, lineHeight: 1.6, maxWidth: 380, fontFamily: SANS }}>
+            <div style={{ color: T.dim, fontSize: 14, marginBottom: 6 }}>This project is empty.</div>
+            Scan a repository to see what its code needs, or press + to place a service by hand.
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          position: 'absolute', left: 58, bottom: 18, maxWidth: 320, zIndex: 12,
+          padding: '10px 13px', background: T.panel, border: `1px solid ${T.line}`,
+          borderRadius: 11, color: T.faint, fontSize: 12, lineHeight: 1.55, fontFamily: SANS,
+          pointerEvents: 'none',
+        }}>
+          <span style={{ color: T.dim }}>Everything already in this project.</span> Scan a
+          repository to see what it needs and this has not got.
+        </div>
+      ))}
+    </div>
   );
 }
 
-function RepoCard({ repo, missing }: { repo: NonNullable<Board['repo']>; missing: number }) {
-  const leaf = repo.dir.split('/').filter(Boolean).pop() ?? repo.dir;
+/**
+ * The canvas fills whatever it is dropped into.
+ *
+ * React Flow measures its own container and refuses to lay out inside one with no height —
+ * it renders, silently, at zero pixels. So the flex slot is claimed by a react-native View
+ * and the DOM canvas is pinned to its box, rather than trusting `height: 100%` to resolve
+ * through the react-native-web tree.
+ */
+export function ArchCanvas(props: CanvasProps) {
   return (
-    <View
-      style={{
-        backgroundColor: T.panel, borderColor: T.line, borderWidth: 1, borderRadius: 18, padding: 14,
-        shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 14, shadowOffset: { width: 0, height: 6 },
-      }}
-    >
-      <Text style={{ color: T.faint, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.6 }}>REPOSITORY</Text>
-      <Text numberOfLines={1} style={{ color: T.text, fontWeight: '700', fontSize: 14, marginTop: 4 }}>{leaf}</Text>
-      <Text numberOfLines={1} style={{ color: T.faint, fontFamily: T.mono, fontSize: 10, marginTop: 2 }}>
-        {repo.scanned.join(' · ') || 'no manifests'}
-      </Text>
-
-      <View style={{ height: 1, backgroundColor: T.line, marginVertical: 10 }} />
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: T.ok }} />
-          <Text style={{ color: T.dim, fontSize: 11.5 }}>{repo.satisfied} satisfied</Text>
-        </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: missing > 0 ? T.err : T.faint }} />
-          <Text style={{ color: missing > 0 ? T.err : T.dim, fontSize: 11.5 }}>{missing} missing</Text>
-        </View>
-      </View>
+    <View style={{ flex: 1, minHeight: 0 }}>
+      <ReactFlowProvider>
+        <Inner {...props} />
+      </ReactFlowProvider>
     </View>
   );
 }

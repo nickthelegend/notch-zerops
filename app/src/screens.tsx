@@ -87,14 +87,20 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<(Plan & { types: string[]; ha: boolean }) | null>(null);
   const [ha, setHa] = useState(false);
+  /** Services placed on the board by hand, folded into the same provision plan. */
+  const [added, setAdded] = useState<string[]>([]);
   const [created, setCreated] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  /** A one-off confirmation with its own label — “CREATED” is wrong for three of the four. */
+  const [notice, setNotice] = useState<{ label: string; text: string } | null>(null);
   const [events, setEvents] = useState<BrainEvent[] | null>(null);
   const [newName, setNewName] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [against, setAgainst] = useState('');
   const [comparison, setComparison] = useState<Comparison | null>(null);
-  const [deployed, setDeployed] = useState<{ url: string | null; note: string } | null>(null);
+  const [deployed, setDeployed] = useState<{
+    url: string | null; note: string; done: boolean; ok: boolean | null;
+    health: { status: number; ms: number } | null; lines: string[];
+  } | null>(null);
 
   /** In-flight guard in a ref: `setBusy(true)` has not landed when a second tap arrives. */
   const inFlight = useRef(false);
@@ -113,7 +119,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   /** Findings belong to the project they came from. A switch makes them wrong, not stale. */
   useEffect(() => {
     setDrift(null); setPlan(null); setCreated(null); setEvents(null); setError(null); setNotice(null);
-    setComparison(null); setAgainst(''); setDeployed(null);
+    setComparison(null); setAgainst(''); setDeployed(null); setAdded([]);
   }, [projectId]);
 
   /**
@@ -125,12 +131,38 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
    */
   const deploy = () => void guard(async () => {
     if (dir.trim() === '' || projectId === '') return;
-    setError(null); setDeployed(null);
+    setError(null);
+    setDeployed({ url: null, note: 'Starting…', done: false, ok: null, health: null, lines: [] });
     try {
-      const r = await api.deploy(projectId, dir.trim(), 'nodejs');
-      setDeployed({ url: r.url, note: r.note ?? '' });
+      const { runId } = await api.deploy(projectId, dir.trim(), 'nodejs');
+      /*
+       * Poll, and show the build as it happens.
+       *
+       * A Zerops build runs for minutes. Awaiting one request for that long leaves the app
+       * frozen on a spinner through the most convincing part of the whole thing — real work,
+       * on somebody else's computer, with the log to prove it.
+       */
+      let from = 0;
+      for (;;) {
+        const s = await api.deployStatus(runId, from);
+        from = s.total;
+        setDeployed((cur) => ({
+          url: s.url,
+          note: s.note !== '' ? s.note : cur?.note ?? '',
+          done: s.done,
+          ok: s.ok,
+          health: s.health,
+          // Bounded: a build log runs to hundreds of lines and only the tail is readable.
+          lines: [...(cur?.lines ?? []), ...s.lines].slice(-120),
+        }));
+        if (s.done) break;
+        await new Promise((r) => setTimeout(r, 900));
+      }
       setEvents((await api.history(projectId)).events);
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      setError((e as Error).message);
+      setDeployed((cur) => (cur === null ? null : { ...cur, done: true, ok: false }));
+    }
   });
 
   /** Compare this project against another one on the account. */
@@ -160,7 +192,15 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
     } catch (e) { setError((e as Error).message); }
   });
 
-  const missing = useMemo(() => (drift?.drift.provisionable ?? []).map((i) => i.type), [drift]);
+  /*
+   * What the plan will create: what the scan found missing, PLUS whatever was dropped on the
+   * board by hand. One list, one preview, one confirm — a service you added yourself goes
+   * through exactly the same import file as a service the scanner asked for, because two
+   * paths to provisioning is two things to get wrong.
+   */
+  const missing = useMemo(
+    () => [...new Set([...(drift?.drift.provisionable ?? []).map((i) => i.type), ...added])],
+    [drift, added]);
 
   const preview = () => void guard(async () => {
     setError(null); setCreated(null);
@@ -197,16 +237,29 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       setProjects((cur) => [r.project, ...(cur ?? [])]);
       setProjectId(r.project.id);
       setNewName(null);
-      setNotice(`Created project “${r.project.name}”. It is empty — scan a repo to see what it needs.`);
+      setNotice({ label: 'CREATED', text: `Created project “${r.project.name}”. It is empty — scan a repo to see what it needs.` });
     } catch (e) { setError((e as Error).message); }
   });
 
-  const ghosts: Ghost[] = useMemo(
-    () => (drift?.drift.items ?? [])
+  const ghosts: Ghost[] = useMemo(() => {
+    const found = (drift?.drift.items ?? [])
       .filter((i) => i.status === 'missing')
-      .map((i) => ({ type: i.type, reason: i.summary, confidence: i.required?.confidence ?? 'strong' })),
-    [drift],
-  );
+      .map((i) => ({ type: i.type, reason: i.summary, confidence: i.required?.confidence ?? 'strong' }));
+    const seen = new Set(found.map((g) => g.type));
+    return [
+      ...found,
+      ...added.filter((t) => !seen.has(t)).map((t) => ({
+        type: t, reason: 'You added this on the board.', confidence: 'strong',
+      })),
+    ];
+  }, [drift, added]);
+
+  /** Drop a service on the board. It joins the plan; nothing is created until you confirm. */
+  const addService = (type: string) => {
+    setAdded((cur) => (cur.includes(type) ? cur : [...cur, type]));
+    setPlan(null);
+    setNotice({ label: 'ADDED', text: `${type} is on the board. Preview the plan to see the import file it produces.` });
+  };
 
   const counts = drift?.drift.counts;
   const current = projects?.find((p) => p.id === projectId);
@@ -221,6 +274,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       missing: counts?.['missing'] ?? 0,
     },
     wiring: drift?.wiring ?? null,
+    added,
   };
 
   return (
@@ -302,7 +356,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
                   // A rejected save used to disappear into an unhandled rejection, so the
                   // button just did nothing. Say what went wrong instead.
                   void saveYaml(url)
-                    .then((p) => { if (p !== null) setNotice(`Wrote ${p}`); })
+                    .then((p) => { if (p !== null) setNotice({ label: 'EXPORTED', text: `Wrote ${p}` }); })
                     .catch((e: Error) => setError(`Could not write zerops.yaml: ${e.message}`));
                 } else {
                   void Linking.openURL(url);
@@ -340,21 +394,41 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
 
       {/* ---- banners ---- */}
       {error !== null && <View style={{ padding: spacing.md }}><Callout label="ERROR" text={error} tint={T.err} /></View>}
-      {notice !== null && <View style={{ padding: spacing.md }}><Callout label="CREATED" text={notice} tint={T.ok} /></View>}
+      {notice !== null && <View style={{ padding: spacing.md }}><Callout label={notice.label} text={notice.text} tint={T.ok} /></View>}
       {deployed !== null && (
         <View style={{ padding: spacing.md }}>
-          <Panel tint={deployed.url === null ? T.warn : T.ok}>
-            <SectionLabel text={deployed.url === null ? 'DEPLOYED' : 'DEPLOYED AND REACHABLE'} />
-            <View style={{ paddingHorizontal: spacing.md, paddingBottom: spacing.md, gap: 6 }}>
+          <Panel tint={!deployed.done ? T.thread : deployed.ok === true ? T.ok : T.err}>
+            <SectionLabel text={
+              !deployed.done ? 'BUILDING ON ZEROPS'
+                : deployed.ok === true
+                  ? (deployed.health !== null ? `LIVE — HTTP ${deployed.health.status} IN ${deployed.health.ms}MS` : 'DEPLOYED')
+                  : 'DEPLOY FAILED'
+            } />
+            <View style={{ paddingHorizontal: spacing.md, paddingBottom: spacing.md, gap: 8 }}>
               {deployed.url !== null && (
                 <Text
                   onPress={() => void Linking.openURL(deployed.url as string)}
-                  style={{ color: T.thread, fontFamily: T.mono, fontSize: 13 }}
+                  style={{ color: T.thread, fontFamily: T.mono, fontSize: 13.5 }}
                 >
                   {deployed.url}
                 </Text>
               )}
-              <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 18 }}>{deployed.note}</Text>
+              {deployed.note !== '' && (
+                <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 18 }}>{deployed.note}</Text>
+              )}
+              {deployed.lines.length > 0 && (
+                <ScrollView
+                  style={{ maxHeight: 190, backgroundColor: T.editor, borderColor: T.line, borderWidth: 1, borderRadius: radii.input }}
+                  contentContainerStyle={{ padding: 10 }}
+                  ref={(r) => { if (!deployed.done) r?.scrollToEnd({ animated: false }); }}
+                >
+                  {deployed.lines.map((l, i) => (
+                    <Text key={`${i}-${l.slice(0, 24)}`} style={{ color: T.faint, fontFamily: T.mono, fontSize: 10.5, lineHeight: 15 }}>
+                      {l}
+                    </Text>
+                  ))}
+                </ScrollView>
+              )}
             </View>
           </Panel>
         </View>
@@ -431,7 +505,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       {tab === 'arch' && (
         board === null
           ? <Empty text={error === null ? 'Loading your architecture…' : 'Could not read this project.'} />
-          : <ArchCanvas board={board} />
+          : <ArchCanvas board={board} onAdd={addService} onProvision={preview} busy={busy} />
       )}
 
       {tab === 'drift' && (
@@ -644,7 +718,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
             projectId={projectId}
             dir={dir.trim()}
             canPropose={missing.length > 0}
-            onPlan={(p, from) => { setPlan(p); setNotice(`${from} drafted this. Nothing is created until you confirm it.`); }}
+            onPlan={(p, from) => { setPlan(p); setNotice({ label: 'DRAFTED', text: `${from} drafted this. Nothing is created until you confirm it.` }); }}
           />
         </View>
       )}

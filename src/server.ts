@@ -99,6 +99,57 @@ const locks = new LockManager(getPool(), async (e) => {
   });
 });
 
+/**
+ * Deploys in flight.
+ *
+ * A build takes minutes. Answering the HTTP request only when it finishes means the UI has
+ * nothing to show for those minutes but a spinner — and the build log is the most convincing
+ * part of the whole demo, because it is unmistakably real work happening on somebody else's
+ * computer. So the request returns an id immediately and the lines are collected here to be
+ * polled.
+ *
+ * In memory ON PURPOSE, and not a database in disguise: this is the transcript of a process
+ * that is still running. The OUTCOME — succeeded, failed, the URL, the tail of the log — is
+ * written to Postgres like everything else, so nothing durable lives here. A daemon restart
+ * loses an in-flight build's scrollback, which is exactly as much as it should lose.
+ */
+interface DeployRun {
+  lines: string[];
+  done: boolean;
+  ok: boolean | null;
+  url: string | null;
+  note: string;
+  health: { status: number; ms: number } | null;
+  startedAt: number;
+}
+const deploys = new Map<string, DeployRun>();
+
+/** Keep the map from growing forever in a long session. */
+function reapDeploys(): void {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [id, run] of deploys) if (run.done && run.startedAt < cutoff) deploys.delete(id);
+}
+
+/**
+ * Does the deployed thing actually answer?
+ *
+ * "Zerops accepted the deploy" and "the app is up" are different claims, and only one of them
+ * is what anybody wanted. A container can start, pass its own health check and still serve a
+ * 502 through the router while routing settles — so Notch asks the URL the same way a user
+ * would, and retries for a while before giving up, because a cold start is not a failure.
+ */
+async function checkHealth(url: string, attempts = 20): Promise<{ status: number; ms: number } | null> {
+  for (let i = 0; i < attempts; i += 1) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: 'follow' });
+      if (r.status < 500) return { status: r.status, ms: Date.now() - t0 };
+    } catch { /* not routing yet */ }
+    await new Promise((ok) => setTimeout(ok, 3000));
+  }
+  return null;
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
@@ -753,52 +804,95 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           payload: { service: target?.name ?? serviceId, dir, setup },
         });
 
-        try {
-          const r = await push(tokenForCli, serviceId, dir, setup, () => { /* collected below */ });
+        // Answer now, work in the background: the log is the point and it takes minutes.
+        reapDeploys();
+        const runId = randomUUID();
+        const run: DeployRun = {
+          lines: [], done: false, ok: null, url: null, note: '', health: null, startedAt: Date.now(),
+        };
+        deploys.set(runId, run);
 
-          /*
-           * Ask for the subdomain, then re-read.
-           *
-           * A deploy that works and hands back no address looks broken to whoever is watching,
-           * and the import file's `enableSubdomainAccess` did not reliably produce one. So if
-           * the service serves HTTP and has no public address, Notch asks for one — the
-           * remaining half of "deploy it and give me the URL".
-           */
-          let after = (await c.services(projectId)).find((s) => s.id === serviceId);
-          const servesHttp = after?.ports.some((x) => x.httpRouting === true) === true;
-          if (r.ok && after !== undefined && servesHttp && after.subdomainAccess !== true) {
-            await c.enableSubdomain(serviceId).catch(() => null);
-            await new Promise((ok) => setTimeout(ok, 2500));
-            after = (await c.services(projectId)).find((s) => s.id === serviceId);
-          }
-          const port = after?.ports.find((x) => x.httpRouting === true)?.port ?? after?.ports[0]?.port ?? 3000;
-          const url = (after?.subdomainAccess === true || after?.hasPublicHttpRoutingAccess === true)
-            && after !== undefined
-            ? await c.publicUrl(projectId, after.name, port).catch(() => null)
-            : null;
+        const svcId = serviceId;
+        void (async () => {
+          try {
+            const r = await push(tokenForCli, svcId, dir, setup, (line) => run.lines.push(line));
 
-          await record({
-            kind: r.ok ? 'deploy_succeeded' : 'deploy_failed',
-            scope: projectId,
-            payload: { service: target?.name ?? serviceId, ms: r.ms, code: r.code, url, tail: r.log.slice(-6) },
-          });
+            let after = (await c.services(projectId)).find((s) => s.id === svcId);
+            const servesHttp = after?.ports.some((x) => x.httpRouting === true) === true;
+            if (r.ok && after !== undefined && servesHttp && after.subdomainAccess !== true) {
+              run.lines.push('· asking Zerops for a public subdomain');
+              await c.enableSubdomain(svcId).catch(() => null);
+              await new Promise((ok) => setTimeout(ok, 2500));
+              after = (await c.services(projectId)).find((s) => s.id === svcId);
+            }
 
-          return sendJson(res, r.ok ? 200 : 502, {
-            ok: r.ok, ms: r.ms, code: r.code, log: r.log, url,
-            service: target?.name ?? serviceId,
-            note: r.ok
+            const port = after?.ports.find((x) => x.httpRouting === true)?.port ?? after?.ports[0]?.port ?? 3000;
+            const url = (after?.subdomainAccess === true || after?.hasPublicHttpRoutingAccess === true)
+              && after !== undefined
+              ? await c.publicUrl(projectId, after.name, port).catch(() => null)
+              : null;
+            run.url = url;
+
+            // Deployed is not the same as up. Ask the URL the way a user would.
+            if (r.ok && url !== null) {
+              run.lines.push(`· checking ${url}`);
+              run.health = await checkHealth(url);
+              run.lines.push(run.health === null
+                ? '· no answer yet — the router may still be settling'
+                : `· answered HTTP ${run.health.status} in ${run.health.ms}ms`);
+            }
+
+            run.ok = r.ok;
+            run.note = r.ok
               ? (url === null
-                ? 'Deployed. This service has no public subdomain, so there is no URL to open — enable public access on it in Zerops.'
-                : 'Deployed and reachable.')
-              : 'Zerops rejected the build. The log above is what it said.',
-          });
-        } catch (err) {
-          await record({ kind: 'deploy_failed', scope: projectId, payload: { error: String(err) } });
-          if (DeployError.is(err)) {
-            return sendJson(res, 502, { error: 'deploy_failed', message: err.message, detail: err.detail });
+                ? 'Deployed. This service has no public subdomain, so there is no address to open.'
+                : run.health === null
+                  ? 'Deployed. The address is live but has not answered yet — give it a moment and reload.'
+                  : `Deployed and answering (HTTP ${run.health.status}).`)
+              : 'Zerops rejected the build. The log above is what it said.';
+
+            await record({
+              kind: r.ok ? 'deploy_succeeded' : 'deploy_failed',
+              scope: projectId,
+              payload: {
+                service: target?.name ?? svcId, ms: r.ms, code: r.code, url,
+                health: run.health, tail: r.log.slice(-6),
+              },
+            });
+          } catch (err) {
+            run.ok = false;
+            run.note = DeployError.is(err) ? err.message : String(err);
+            if (DeployError.is(err) && err.detail !== '') run.lines.push(err.detail);
+            await record({ kind: 'deploy_failed', scope: projectId, payload: { error: run.note } });
+          } finally {
+            run.done = true;
           }
-          throw err;
+        })();
+
+        return sendJson(res, 202, { runId, service: target?.name ?? serviceId });
+      }
+
+      /** The transcript of a deploy in flight. Polled; `from` is the line already seen. */
+      case '/api/deploy/status': {
+        const id = url.searchParams.get('id');
+        const from = Number(url.searchParams.get('from') ?? 0);
+        if (id === null) return sendJson(res, 400, { error: 'missing_id', message: 'Which deploy?' });
+        const run = deploys.get(id);
+        if (run === undefined) {
+          return sendJson(res, 404, {
+            error: 'no_such_deploy',
+            message: 'That deploy is not in flight. The daemon may have restarted; the timeline has the outcome.',
+          });
         }
+        return sendJson(res, 200, {
+          lines: run.lines.slice(Number.isFinite(from) ? from : 0),
+          total: run.lines.length,
+          done: run.done,
+          ok: run.ok,
+          url: run.url,
+          note: run.note,
+          health: run.health,
+        });
       }
 
       /** Which coding agents are installed on this machine. */

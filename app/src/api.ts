@@ -172,9 +172,14 @@ export const api = {
   history: (projectId: string) => call<{ events: BrainEvent[]; byKind: Array<{ kind: string; count: number }> }>(`/api/history?projectId=${encodeURIComponent(projectId)}`),
   compare: (a: string, b: string) =>
     call<Comparison>(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
+  /** Starts a deploy and returns at once; the build takes minutes. Poll `deployStatus`. */
   deploy: (projectId: string, dir: string, setup: string) =>
-    call<{ ok: boolean; ms: number; url: string | null; log: string[]; note?: string; service: string }>(
-      '/api/deploy', json({ projectId, dir, setup })),
+    call<{ runId: string; service: string }>('/api/deploy', json({ projectId, dir, setup })),
+  deployStatus: (id: string, from: number) =>
+    call<{
+      lines: string[]; total: number; done: boolean; ok: boolean | null;
+      url: string | null; note: string; health: { status: number; ms: number } | null;
+    }>(`/api/deploy/status?id=${encodeURIComponent(id)}&from=${from}`),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
   propose: (agent: string, projectId: string, dir: string, ha: boolean) =>
     call<{
