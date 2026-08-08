@@ -9,15 +9,35 @@ agent session has on its own:
    every agent, not only the one that learned them.
 2. **Multi-agent coordination** — a single-writer lock so two agents acting on the same
    Zerops project don't collide.
-3. **Infra judgement, not just infra config** — given a plain-English requirement, Brain
-   reasons about which Zerops managed services actually fit, and can provision, deploy and
-   scale them for real through the Zerops REST API using one securely-held account token.
+Plus the **Observatory**, a live dashboard so coordination can be watched rather than taken
+on trust.
 
-Plus **Doctor**, which audits a Zerops project and explains its own findings, and the
-**Observatory**, a live dashboard so coordination can be watched rather than taken on trust.
+## Why this and not ZCP
 
-Zerops's own agent integration, ZCP, is scoped to one project per session with no persistent
-memory and no multi-agent coordination. Those two gaps are what this builds.
+ZCP already does the end-to-end infra work, and does it well — its own docs describe the loop
+as *"the agent reads live state, chooses the app runtime and dependencies, changes the app,
+deploys through Zerops, verifies real behavior, and returns proof or a blocker."* The ZCP
+container ships `zcli` and a Zerops MCP server, so anything inside it can already deploy,
+scale and inspect the project. **Brain does not reimplement any of that.** An earlier draft of
+this README promised an `infra.provision` / `infra.deploy` / `infra.scale` tool surface; that
+was a duplicate of the toggle, and it was cut.
+
+What ZCP does not have is the layer this builds, and Zerops' own product makes the gap
+concrete rather than theoretical:
+
+**No memory.** The documented recovery from an interrupted session is *"Chat history is not
+the source of truth… Read current project status and tell me where this project stands before
+changing anything."* Live state tells an agent that Redis exists. It cannot tell it why Redis
+and not Valkey, or that Valkey was tried and rejected — the decisions and dead ends that are
+most expensive to re-derive.
+
+**No coordination between agents.** The project-creation screen offers to install **Claude
+Code, Codex, Antigravity, Grok Build and Cursor CLI** into the same ZCP container, and gives
+them nothing to share memory with or to keep them off each other's work. Two agents in that
+one container are strangers. Across projects it is stronger still: ZCP access is *"sealed
+inside the project's own VXLAN"*, so an agent in `my-project-johnd` and one in
+`my-project-janed` are on different private networks and can only meet through a GitHub pull
+request — which carries a diff, not the reasoning behind it.
 
 ---
 

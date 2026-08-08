@@ -76,23 +76,38 @@ const DEFAULT_TTL_SEC = 300;
  * The `WHERE` on the `DO UPDATE` is what makes this a compare-and-swap rather than a
  * clobber: the row is only overwritten when the existing lock has expired, or when the same
  * agent is re-acquiring (idempotent renewal). Otherwise the conflict resolves to no update,
- * `RETURNING` yields nothing, and the caller learns it lost.
+ * the CTE yields no rows, and the caller learns it lost.
+ *
+ * The `prior` CTE exists because `excluded` is NOT referenceable from `RETURNING` -- Postgres
+ * exposes it only inside `DO UPDATE SET` and its `WHERE`, and it raises 42P01 otherwise
+ * (found by running it, not by reading the manual). `RETURNING locks.holder` is no help
+ * either: by then it is the NEW holder. Every CTE in one statement reads the same snapshot,
+ * so `prior` sees the row as it was BEFORE the upsert, which is how "did I take over an
+ * expired lock" gets answered without a second round trip and without leaving the
+ * single-statement guarantee.
  *
  * `now()` throughout is POSTGRES's clock, never the caller's. Two containers with a few
  * hundred milliseconds of clock skew would otherwise disagree about whether a lock had
  * expired, and the whole guarantee would rest on NTP.
  */
 const ACQUIRE_SQL = `
-  INSERT INTO locks (resource_id, scope, holder, acquired_at, expires_at)
-  VALUES ($1, $2, $3, now(), now() + ($4::INT * INTERVAL '1 second'))
-  ON CONFLICT (resource_id, scope) DO UPDATE
-    SET holder      = excluded.holder,
-        acquired_at = now(),
-        expires_at  = excluded.expires_at
-    WHERE locks.expires_at <= now()
-       OR locks.holder = excluded.holder
-  RETURNING resource_id, scope, holder, acquired_at, expires_at,
-            (locks.holder IS DISTINCT FROM excluded.holder) AS took_over
+  WITH prior AS (
+    SELECT holder AS prior_holder
+    FROM locks
+    WHERE resource_id = $1 AND scope = $2
+  ), taken AS (
+    INSERT INTO locks (resource_id, scope, holder, acquired_at, expires_at)
+    VALUES ($1, $2, $3, now(), now() + ($4::INT * INTERVAL '1 second'))
+    ON CONFLICT (resource_id, scope) DO UPDATE
+      SET holder      = excluded.holder,
+          acquired_at = now(),
+          expires_at  = excluded.expires_at
+      WHERE locks.expires_at <= now()
+         OR locks.holder = excluded.holder
+    RETURNING resource_id, scope, holder, acquired_at, expires_at
+  )
+  SELECT taken.*, prior.prior_holder
+  FROM taken LEFT JOIN prior ON true
 `;
 
 interface LockRow {
@@ -101,7 +116,8 @@ interface LockRow {
   holder: string;
   acquired_at: Date;
   expires_at: Date;
-  took_over?: boolean;
+  /** Who held it before this call. `null` when the lock did not exist. */
+  prior_holder?: string | null;
 }
 
 const toState = (r: LockRow): LockState => ({
@@ -138,6 +154,10 @@ export class LockManager {
 
     if (row !== undefined) {
       const lock = toState(row);
+      // Took over only if somebody ELSE held it. A re-acquire by the same agent is a
+      // renewal, and reporting that as a takeover would invent contention that never was.
+      const prior = row.prior_holder ?? null;
+      const tookOverExpired = prior !== null && prior !== agentId;
       await this.emit({
         kind: 'lock_acquired',
         agentId,
@@ -146,10 +166,11 @@ export class LockManager {
           resourceId,
           expiresAt: lock.expiresAt.toISOString(),
           ttlSec: ttl,
-          tookOverExpired: row.took_over === true,
+          tookOverExpired,
+          ...(tookOverExpired ? { tookFrom: prior } : {}),
         },
       });
-      return { ok: true, lock, tookOverExpired: row.took_over === true };
+      return { ok: true, lock, tookOverExpired };
     }
 
     // Lost. Read the winner so the caller is told WHO, not merely "no".
