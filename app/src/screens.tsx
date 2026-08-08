@@ -11,6 +11,7 @@ import { Linking, ScrollView, Text, TextInput, View } from 'react-native';
 import { T, radii, spacing } from './theme';
 import { Badge, Btn, Callout, Empty, MetricCard, Panel, SectionLabel, Segmented, ago, field } from './components';
 import { ArchCanvas, type Ghost } from './arch';
+import { canPickFolder, canSaveFile, pickFolder, saveYaml } from './native';
 import { api, type BrainEvent, type DriftResp, type Graph, type Plan, type Project, type Session } from './api';
 
 /* ------------------------------------------------------------------ gate */
@@ -236,10 +237,31 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
             autoCorrect={false}
             onSubmitEditing={scan}
           />
+          {/* Only inside the desktop shell — a browser has no directory chooser to offer. */}
+          {canPickFolder() && (
+            <Btn small label="Choose…" onPress={() => { void pickFolder().then((p) => { if (p !== null) setDir(p); }); }} />
+          )}
           <Btn small primary label={busy ? '…' : 'Scan repo'} onPress={scan} />
           <Btn small label="Refresh" onPress={() => void loadGraph(projectId)} />
           {dir.trim() !== '' && projectId !== '' && (
-            <Btn small label="Export yaml" onPress={() => void Linking.openURL(api.exportUrl(projectId, dir.trim(), ha))} />
+            <Btn
+              small
+              label="Export yaml"
+              onPress={() => {
+                const url = api.exportUrl(projectId, dir.trim(), ha);
+                // In the shell: a real save dialog, and we can say where it went. In a
+                // browser: the browser's own download, which is all it can offer.
+                if (canSaveFile()) {
+                  // A rejected save used to disappear into an unhandled rejection, so the
+                  // button just did nothing. Say what went wrong instead.
+                  void saveYaml(url)
+                    .then((p) => { if (p !== null) setNotice(`Wrote ${p}`); })
+                    .catch((e: Error) => setError(`Could not write zerops.yaml: ${e.message}`));
+                } else {
+                  void Linking.openURL(url);
+                }
+              }}
+            />
           )}
         </View>
       </View>

@@ -1,0 +1,14 @@
+{
+  "name": "notch-zerops-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Notch desktop — an Electron shell around the Brain daemon's web app.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

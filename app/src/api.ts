@@ -123,6 +123,16 @@ export const api = {
   provision: (projectId: string, types: string[], ha: boolean, dir: string) =>
     call<{ created: Array<{ hostname: string }>; graph: Graph | null; note: string }>('/api/provision', json({ projectId, types, ha, dir })),
   history: (projectId: string) => call<{ events: BrainEvent[]; byKind: Array<{ kind: string; count: number }> }>(`/api/history?projectId=${encodeURIComponent(projectId)}`),
+  /*
+   * ABSOLUTE, always.
+   *
+   * Everything else here is fetched from the page, where a relative path is correct and
+   * `BASE` is empty. This one is different: it is handed to the Electron main process, which
+   * refuses anything that is not a daemon URL — and a bare `/api/export?…` is not one. The
+   * export silently did nothing in the desktop build because of it, so the origin is
+   * spelled out rather than inherited.
+   */
   exportUrl: (projectId: string, dir: string, ha: boolean) =>
-    `${BASE}/api/export?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir)}&ha=${ha}`,
+    `${BASE === '' ? globalThis.location.origin : BASE}` +
+    `/api/export?projectId=${encodeURIComponent(projectId)}&dir=${encodeURIComponent(dir)}&ha=${ha}`,
 };
