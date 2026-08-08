@@ -18,8 +18,8 @@
  *   actually about is the relationship between a repo and the infrastructure it expects, so
  *   the repo is drawn, and the connector carries the verdict.
  */
-import { useMemo } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PanResponder, ScrollView, Text, View } from 'react-native';
 import Svg, { Circle, Path } from 'react-native-svg';
 
 import { T, radii } from './theme';
@@ -164,54 +164,225 @@ const tileCentre = (i: number) => ({
   y: PAD + HEAD + Math.floor(i / PER_ROW) * (TILE_H + TILE_GAP) + TILE_H / 2,
 });
 
-function ProjectGroup({
-  name, status, nodes, ghosts, width, wiring,
+/**
+ * Where each tile sits, and the fact that you can move it.
+ *
+ * The grid is only a STARTING arrangement. Anybody reading an architecture diagram wants to
+ * pull the thing they care about into the middle and push the noise to the edge, and a diagram
+ * you cannot rearrange is a picture rather than a tool. So every tile is draggable, the edges
+ * follow the tiles rather than the grid, and the arrangement is remembered per project — you
+ * come back tomorrow to the layout you left.
+ *
+ * A movement THRESHOLD separates a drag from a click: without one, every press nudges a card a
+ * pixel or two and the board slowly falls out of alignment just from being used.
+ */
+const DRAG_THRESHOLD = 3;
+
+interface Tile {
+  key: string;
+  kind: 'service' | 'ghost';
+  node?: ArchNode;
+  ghost?: Ghost;
+  /** What `wiring` calls this, so an edge can find its tile. */
+  type: string;
+}
+
+function layoutKey(projectId: string): string {
+  return `notch.layout.${projectId}`;
+}
+
+function loadLayout(projectId: string): Record<string, XY> {
+  try {
+    const raw = globalThis.localStorage?.getItem(layoutKey(projectId));
+    return raw === null || raw === undefined ? {} : JSON.parse(raw) as Record<string, XY>;
+  } catch { return {}; }
+}
+
+function saveLayout(projectId: string, pos: Record<string, XY>): void {
+  try { globalThis.localStorage?.setItem(layoutKey(projectId), JSON.stringify(pos)); } catch { /* private mode */ }
+}
+
+interface XY { x: number; y: number }
+
+function DraggableTile({
+  tile, at, onMove, onGrab, onDrop,
 }: {
-  name: string; status: string; nodes: ArchNode[]; ghosts: Ghost[]; width: number;
-  wiring: Wiring | null;
+  tile: Tile; at: XY;
+  onMove: (k: string, p: XY) => void;
+  onGrab: (k: string) => void;
+  onDrop: () => void;
+}) {
+  /*
+   * The responder is created ONCE and reads everything through refs.
+   *
+   * A first version rebuilt it with `useMemo` whenever the tile's position changed — which is
+   * every frame of a drag. Each rebuild handed react-native-web a different responder object
+   * mid-gesture, the gesture was dropped after the first move, and a 260px drag moved the card
+   * 19px. Gesture handlers have to outlive the values they act on.
+   */
+  const atRef = useRef(at);
+  atRef.current = at;
+  const origin = useRef<XY>(at);
+  const cb = useRef({ onMove, onGrab, onDrop });
+  cb.current = { onMove, onGrab, onDrop };
+
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    // Claim the gesture only once it is actually a drag, so a tap stays a tap.
+    onMoveShouldSetPanResponder: (_e, g) =>
+      Math.abs(g.dx) > DRAG_THRESHOLD || Math.abs(g.dy) > DRAG_THRESHOLD,
+    onPanResponderGrant: () => { origin.current = atRef.current; cb.current.onGrab(tile.key); },
+    onPanResponderMove: (_e, g) => {
+      // Clamped at zero: a tile dragged past the top-left would sit outside the container and
+      // become unreachable, since the canvas only scrolls in the positive direction.
+      cb.current.onMove(tile.key, {
+        x: Math.max(0, origin.current.x + g.dx),
+        y: Math.max(0, origin.current.y + g.dy),
+      });
+    },
+    onPanResponderRelease: () => cb.current.onDrop(),
+    onPanResponderTerminate: () => cb.current.onDrop(),
+    onPanResponderTerminationRequest: () => false,
+  })).current;
+
+  return (
+    <View
+      {...pan.panHandlers}
+      style={{ position: 'absolute', left: at.x, top: at.y, cursor: 'grab' } as object}
+    >
+      {tile.kind === 'service' && tile.node !== undefined
+        ? <ServiceTile n={tile.node} />
+        : tile.ghost !== undefined ? <GhostTile g={tile.ghost} /> : null}
+    </View>
+  );
+}
+
+function ProjectGroup({
+  projectId, name, status, nodes, ghosts, wiring, onSize,
+}: {
+  projectId: string; name: string; status: string;
+  nodes: ArchNode[]; ghosts: Ghost[]; wiring: Wiring | null;
+  /** The container tells the canvas how big it has become, so nothing gets clipped. */
+  onSize: (s: { w: number; h: number }) => void;
 }) {
   const tint = statusTint(status);
 
+  const tiles: Tile[] = useMemo(() => [
+    ...nodes.map((n) => ({
+      key: `s:${n.id}`, kind: 'service' as const, node: n,
+      type: n.typeName.toLowerCase().replace(/[^a-z0-9]/g, ''),
+    })),
+    ...ghosts.map((g) => ({ key: `g:${g.type}`, kind: 'ghost' as const, ghost: g, type: g.type.toLowerCase() })),
+  ], [nodes, ghosts]);
+
   /*
-   * The edges, drawn between the tiles they connect.
-   *
-   * Tile positions are computed rather than measured: the grid is fixed-size and wraps at a
-   * known column count, so index arithmetic gives the same answer layout would, without
-   * needing every tile to report its box back up. The SVG is rendered BEFORE the tiles so the
-   * lines pass behind the cards instead of across their text.
+   * Saved positions win; anything new falls into the next free grid slot. A service
+   * provisioned after you arranged the board should appear somewhere sensible without
+   * disturbing the arrangement you made.
    */
-  const order = [
-    ...nodes.map((n) => ({ key: n.typeName.toLowerCase().replace(/[^a-z0-9]/g, ''), name: n.name })),
-    ...ghosts.map((g) => ({ key: g.type.toLowerCase(), name: g.type })),
-  ];
-  const indexOf = (type: string) => {
-    const t = type.toLowerCase();
-    return order.findIndex((o) => o.key.includes(t) || t.includes(o.key) || o.name.toLowerCase() === t);
+  const [pos, setPos] = useState<Record<string, XY>>({});
+  const [dragging, setDragging] = useState<string | null>(null);
+
+  useEffect(() => {
+    const saved = loadLayout(projectId);
+    setPos(() => {
+      const next: Record<string, XY> = {};
+      tiles.forEach((t, i) => { next[t.key] = saved[t.key] ?? tileCentre(i); });
+      return next;
+    });
+  }, [projectId, tiles]);
+
+  const move = useCallback((k: string, p: XY) => {
+    setPos((cur) => ({ ...cur, [k]: p }));
+  }, []);
+
+  // Written on release rather than on every frame: a drag fires dozens of updates a second and
+  // localStorage is synchronous.
+  useEffect(() => {
+    if (dragging !== null || Object.keys(pos).length === 0) return;
+    saveLayout(projectId, pos);
+  }, [dragging, pos, projectId]);
+
+  const reset = () => {
+    const next: Record<string, XY> = {};
+    tiles.forEach((t, i) => { next[t.key] = tileCentre(i); });
+    setPos(next);
+    saveLayout(projectId, next);
   };
 
-  const runtimeIdx = wiring?.runtime === undefined || wiring?.runtime === null ? -1 : indexOf(wiring.runtime);
-  const wires = wiring === null || runtimeIdx < 0
-    ? []
-    : wiring.edges.flatMap((e) => {
-      const j = indexOf(e.to);
-      if (j < 0 || j === runtimeIdx) return [];
-      const colour = !e.deployed ? T.err : e.confidence === 'likely' ? T.warn : T.thread;
-      return [{ a: tileCentre(runtimeIdx), b: tileCentre(j), colour, dashed: !e.deployed, key: `${e.from}-${e.to}` }];
-    });
+  const centreOf = (k: string): XY => {
+    const p = pos[k] ?? { x: 0, y: 0 };
+    return { x: p.x + TILE_W / 2, y: p.y + TILE_H / 2 };
+  };
 
-  const gridH = gridHeight(order.length);
+  const byType = (type: string): Tile | undefined => {
+    const t = type.toLowerCase();
+    return tiles.find((x) => x.type.includes(t) || t.includes(x.type));
+  };
+
+  const runtimeTile = wiring?.runtime === undefined || wiring?.runtime === null ? undefined : byType(wiring.runtime);
+  const wires = runtimeTile === undefined || wiring === null ? [] : wiring.edges.flatMap((e) => {
+    const target = byType(e.to);
+    if (target === undefined || target.key === runtimeTile.key) return [];
+    return [{
+      key: `${e.from}-${e.to}`,
+      a: centreOf(runtimeTile.key), b: centreOf(target.key),
+      colour: !e.deployed ? T.err : e.confidence === 'likely' ? T.warn : T.thread,
+      dashed: !e.deployed,
+    }];
+  });
+
+  // The container grows to hold wherever the tiles have been put.
+  const extent = Object.values(pos).reduce(
+    (m, p) => ({ w: Math.max(m.w, p.x + TILE_W), h: Math.max(m.h, p.y + TILE_H) }),
+    { w: TILE_W, h: TILE_H });
+  /*
+   * No padding on the container, because the tiles are absolutely positioned.
+   *
+   * React Native lays absolute children out against the PADDING box, so a container with
+   * `padding: 16` shifted every tile another 16px in — the coordinates already include it, and
+   * the bottom row hung outside the border. The header carries its own padding instead and the
+   * tile coordinates are the single source of position.
+   */
+  const width = extent.w + PAD + BORDER * 2;
+  // Bottom room equal to the left inset, so the last row is not shaved by the border.
+  const height = extent.h + PAD * 2 + BORDER * 2;
+
+  /*
+   * Tell the canvas how big this got.
+   *
+   * react-native-web puts `overflow: hidden` on every View, and the canvas above was sized
+   * from the ORIGINAL grid — so the moment a tile was dragged past the starting bounds the
+   * container was silently cropped by its own parent. Dragging is the whole feature; the
+   * canvas has to grow with it.
+   */
+  useEffect(() => { onSize({ w: width, h: height }); }, [width, height, onSize]);
+
   return (
     <View
       style={{
-        width,
+        width, height,
         backgroundColor: '#151515',
         borderColor: ghosts.length > 0 ? '#3a2328' : T.line,
-        borderWidth: 1, borderRadius: 18, padding: PAD,
+        borderWidth: BORDER, borderRadius: 18,
       }}
     >
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', height: HEAD }}>
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+        height: HEAD, paddingHorizontal: PAD, paddingTop: PAD,
+      }}>
         <Text style={{ color: T.text, fontWeight: '700', fontSize: 13.5 }}>{name}</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text
+            onPress={reset}
+            style={{
+              color: T.dim, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.4,
+              backgroundColor: T.raised, borderColor: T.line, borderWidth: 1,
+              borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 2, overflow: 'hidden',
+            }}
+          >
+            TIDY UP
+          </Text>
           {ghosts.length > 0 && (
             <View style={{ backgroundColor: '#2a1a1e', borderColor: '#4a2b32', borderWidth: 1, borderRadius: radii.pill, paddingHorizontal: 8, paddingVertical: 2 }}>
               <Text style={{ color: T.err, fontFamily: T.mono, fontSize: 9.5, letterSpacing: 0.4 }}>
@@ -225,16 +396,16 @@ function ProjectGroup({
         </View>
       </View>
 
-      {/* Behind the cards: the edges the code claims. */}
+      {/* Behind the cards, and following them: the edges the code claims. */}
       {wires.length > 0 && (
-        <View pointerEvents="none" style={{ position: 'absolute', left: 0, top: 0 }}>
-          <Svg width={width} height={PAD * 2 + HEAD + gridH}>
+        <View pointerEvents="none" style={{ position: 'absolute', left: BORDER, top: BORDER }}>
+          <Svg width={width} height={height}>
             {wires.map((w) => {
-              const dx = Math.max(30, Math.abs(w.b.x - w.a.x) * 0.45);
+              const dx = Math.max(28, Math.abs(w.b.x - w.a.x) * 0.45);
               const d = `M ${w.a.x} ${w.a.y} C ${w.a.x + dx} ${w.a.y}, ${w.b.x - dx} ${w.b.y}, ${w.b.x} ${w.b.y}`;
               return (
                 <Path key={w.key} d={d} stroke={w.colour} strokeWidth={1.4} fill="none"
-                  opacity={w.dashed ? 0.55 : 0.7}
+                  opacity={w.dashed ? 0.55 : 0.75}
                   strokeDasharray={w.dashed ? '4 4' : undefined} strokeLinecap="round" />
               );
             })}
@@ -242,20 +413,17 @@ function ProjectGroup({
         </View>
       )}
 
-      {/*
-        An explicit height for the tile grid.
-        A wrapping flex row sized itself to less than its own content here, and the last row —
-        the ghosts, which are the entire point — was clipped by the container's bottom edge.
-        The row count is known, so the height is stated rather than inferred.
-      */}
-      <View
-        style={{
-          flexDirection: 'row', flexWrap: 'wrap', gap: TILE_GAP,
-          height: gridH,
-        }}
-      >
-        {nodes.map((n) => <ServiceTile key={n.id} n={n} />)}
-        {ghosts.map((g) => <GhostTile key={g.type} g={g} />)}
+      <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}>
+        {tiles.map((t) => (
+          <DraggableTile
+            key={t.key}
+            tile={t}
+            at={pos[t.key] ?? { x: 0, y: 0 }}
+            onMove={move}
+            onGrab={setDragging}
+            onDrop={() => setDragging(null)}
+          />
+        ))}
       </View>
     </View>
   );
@@ -288,8 +456,14 @@ const REPO_W = 268;
 export function ArchCanvas({ board }: { board: Board }) {
   const { graph, ghosts, repo } = board;
 
+  // Starts as the grid's size and follows the container once tiles are moved.
+  const [groupSize, setGroupSize] = useState(() => projectSize(graph.nodes.length + ghosts.length));
+  const onSize = useCallback((s: { w: number; h: number }) => {
+    setGroupSize((cur) => (cur.w === s.w && cur.h === s.h ? cur : s));
+  }, []);
+
   const layout = useMemo(() => {
-    const size = projectSize(graph.nodes.length + ghosts.length);
+    const size = groupSize;
     const repoH = repo === null ? 0 : 116;
     const gapX = 96;
 
@@ -307,7 +481,7 @@ export function ArchCanvas({ board }: { board: Board }) {
       from: { x: REPO_W, y: repoY + repoH / 2 },
       to: { x: projX, y: projY + size.h / 2 },
     };
-  }, [graph.nodes.length, ghosts.length, repo]);
+  }, [groupSize, repo]);
 
   const verdictTint = ghosts.length > 0 ? T.err : T.ok;
 
@@ -338,12 +512,13 @@ export function ArchCanvas({ board }: { board: Board }) {
 
           <View style={{ position: 'absolute', left: layout.projX, top: layout.projY }}>
             <ProjectGroup
+              projectId={graph.projectId}
               name={graph.projectName}
               status={graph.status}
               nodes={graph.nodes}
               ghosts={ghosts}
-              width={layout.size.w}
               wiring={board.wiring}
+              onSize={onSize}
             />
           </View>
         </View>
