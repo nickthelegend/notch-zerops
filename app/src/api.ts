@@ -151,6 +151,13 @@ export const api = {
   compare: (a: string, b: string) =>
     call<Comparison>(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
+  propose: (agent: string, projectId: string, dir: string, ha: boolean) =>
+    call<{
+      agent: string; ms: number;
+      proposal: { types: string[]; why: Record<string, string>; rejected: string[] };
+      plan: Plan | null;
+      note?: string;
+    }>('/api/chat/propose', json({ agent, projectId, dir, ha })),
   chat: (agent: string, prompt: string, projectId: string, dir: string) =>
     call<{ agent: string; reply: string; ms: number }>('/api/chat', json({ agent, prompt, projectId, dir })),
   /*

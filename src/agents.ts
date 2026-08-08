@@ -181,6 +181,7 @@ export function brief(b: Brief): string {
   lines.push(
     '',
     'RULES:',
+    '',
     '  - Answer only from the facts above and from files in this repository.',
     '  - Never invent a service, a version, or a connection that is not listed.',
     '  - If the facts do not answer the question, say so and say what you would need.',
@@ -189,4 +190,94 @@ export function brief(b: Brief): string {
     '',
   );
   return lines.join('\n');
+}
+
+/* -------------------------------------------------------------------------- */
+/* Proposing a fix                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * THE AGENT PROPOSES INTENT. THIS PROCESS PRODUCES THE FILE.
+ *
+ * The obvious design — ask the agent for a `zerops.yaml` and send it — is the wrong one, and
+ * not only because a model can hallucinate `postgresql@99`. It would route a write around
+ * every guarantee this app already makes: versions resolved from the live catalogue, hostnames
+ * put through the collision-safe rules, and a preview built by the same code as the write so
+ * the two cannot diverge.
+ *
+ * So the agent is asked for a LIST OF SERVICE TYPES from a closed vocabulary, and nothing else.
+ * Anything outside the vocabulary is dropped and reported rather than quietly ignored. The
+ * accepted list then goes through exactly the same planner a human clicking the button uses,
+ * lands in exactly the same preview, and still requires exactly the same confirmation.
+ *
+ * The agent's leverage is judgement about WHAT and WHY. It gets no new power to act.
+ */
+export function proposeInstruction(vocabulary: readonly string[]): string {
+  return [
+    '',
+    'TASK: propose which services this project should have in order to run this repository.',
+    '',
+    'Reply with a single JSON object and NOTHING else — no prose before or after, no code fence:',
+    '',
+    '  {"services":[{"type":"<one of the allowed types>","why":"<one short sentence>"}]}',
+    '',
+    `ALLOWED TYPES (any other value is discarded): ${vocabulary.join(', ')}`,
+    '',
+    '  - Propose only what the evidence above supports. Do not add what a project like this',
+    '    "usually" has.',
+    '  - Do not propose anything already deployed.',
+    '  - An empty list is a valid and useful answer: {"services":[]}',
+    '',
+  ].join('\n');
+}
+
+export interface Proposal {
+  types: string[];
+  why: Record<string, string>;
+  /** Suggested but not in the allowed vocabulary. Reported, never silently dropped. */
+  rejected: string[];
+}
+
+/**
+ * Read a proposal out of whatever the agent actually said.
+ *
+ * Forgiving about SHAPE — models wrap JSON in fences and preamble however they are asked not
+ * to — and unforgiving about CONTENT: a type that is not in the vocabulary never reaches the
+ * planner.
+ */
+export function parseProposal(text: string, vocabulary: readonly string[]): Proposal {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) {
+    throw new AgentError('The agent did not reply with a proposal.', text.slice(0, 300));
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    throw new AgentError('The agent\'s proposal was not valid JSON.', text.slice(start, start + 300));
+  }
+
+  const raw = (parsed as { services?: unknown }).services;
+  if (!Array.isArray(raw)) {
+    throw new AgentError('The agent\'s proposal had no `services` list.', JSON.stringify(parsed).slice(0, 300));
+  }
+
+  const allowed = new Set(vocabulary);
+  const types: string[] = [];
+  const why: Record<string, string> = {};
+  const rejected: string[] = [];
+
+  for (const item of raw) {
+    const t = String((item as { type?: unknown })?.type ?? '').trim().toLowerCase();
+    if (t === '') continue;
+    if (!allowed.has(t)) { rejected.push(t); continue; }
+    if (types.includes(t)) continue;
+    types.push(t);
+    const w = String((item as { why?: unknown })?.why ?? '').trim();
+    if (w !== '') why[t] = w;
+  }
+
+  return { types, why, rejected };
 }

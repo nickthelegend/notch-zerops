@@ -30,7 +30,8 @@ import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/sca
 import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
-import { AgentError, ask, available, brief } from './agents.js';
+import { AgentError, ask, available, brief, parseProposal, proposeInstruction } from './agents.js';
+import { SERVICE_TYPES } from './repo/scan.js';
 import { LockManager } from './core/lock.js';
 import { getPool } from './db/pool.js';
 import { migrate } from './db/migrate.js';
@@ -693,6 +694,79 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             payload: { prompt, agent: r.agent, ms: r.ms, chars: r.reply.length },
           });
           return sendJson(res, 200, r);
+        } catch (err) {
+          if (AgentError.is(err)) {
+            return sendJson(res, 502, { error: 'agent_failed', message: err.message, detail: err.detail });
+          }
+          throw err;
+        }
+      }
+
+      /**
+       * Let an agent draft the fix — and nothing more than draft it.
+       *
+       * The agent returns a list of service types from a closed vocabulary. Those go through
+       * the SAME planner the button uses, so versions come from the live catalogue and
+       * hostnames from the collision-safe rules, and the result lands in the SAME preview that
+       * still needs a human to confirm it. An agent cannot invent a version, cannot name a
+       * service the platform does not have, and cannot cause a write.
+       */
+      case '/api/chat/propose': {
+        if (req.method !== 'POST') {
+          return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST to ask for a proposal.' });
+        }
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { agent?: unknown; projectId?: unknown; dir?: unknown; ha?: unknown };
+        const agent = typeof body.agent === 'string' ? body.agent : '';
+        const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+        const dir = typeof body.dir === 'string' ? body.dir : '';
+        if (agent === '' || projectId === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'An agent and a project are required.' });
+        }
+
+        const project = (await c.projects()).find((p) => p.id === projectId);
+        if (project === undefined) return sendJson(res, 404, { error: 'no_such_project', message: 'Pick a project first.' });
+
+        const graph = buildGraph(project, await c.services(projectId));
+        const files = dir !== '' && existsSync(dir) ? await readRepo(dir) : [];
+        const drift = computeDrift(scanRepo(files), graph.nodes);
+
+        const context = brief({
+          projectName: project.name,
+          projectStatus: project.status,
+          services: graph.nodes.map((n) => ({ name: n.name, type: n.typeName, status: n.status })),
+          missing: drift.items.filter((i) => i.status === 'missing').map((i) => ({
+            type: i.type, why: i.summary,
+            evidence: (i.required?.evidence ?? []).map((e) => `${e.found} in ${e.path}`),
+          })),
+          satisfied: drift.items.filter((i) => i.status === 'satisfied').map((i) => i.type),
+          dir,
+          scanned: files.map((f) => f.path),
+        });
+
+        try {
+          const r = await ask(agent, context + proposeInstruction(SERVICE_TYPES), dir, 180_000);
+          const proposal = parseProposal(r.reply, SERVICE_TYPES);
+          if (proposal.types.length === 0) {
+            return sendJson(res, 200, {
+              agent: r.agent, ms: r.ms, proposal,
+              plan: null,
+              note: `${r.agent} proposed nothing to add.`,
+            });
+          }
+
+          // The same planner, the same preview, the same confirmation.
+          const plan = await buildPlan(c, { projectId, types: proposal.types, ha: body.ha === true, dir });
+          if ('error' in plan) return sendJson(res, 400, plan);
+
+          await record({
+            kind: 'agent_proposed',
+            scope: projectId,
+            actor: agent,
+            payload: { types: proposal.types, rejected: proposal.rejected, agent: r.agent, ms: r.ms },
+          });
+          return sendJson(res, 200, { agent: r.agent, ms: r.ms, proposal, plan });
         } catch (err) {
           if (AgentError.is(err)) {
             return sendJson(res, 502, { error: 'agent_failed', message: err.message, detail: err.detail });

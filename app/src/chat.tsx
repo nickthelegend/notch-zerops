@@ -15,7 +15,7 @@ import { ActivityIndicator, ScrollView, Text, TextInput, View } from 'react-nati
 
 import { T, radii, spacing } from './theme';
 import { Btn, field } from './components';
-import { api, type AgentInfo } from './api';
+import { api, type AgentInfo, type Plan } from './api';
 
 interface Turn {
   id: number;
@@ -33,7 +33,16 @@ const SUGGESTIONS = [
   'Which of these gaps matters first, and why?',
 ];
 
-export function ChatPanel({ projectId, dir }: { projectId: string; dir: string }) {
+export function ChatPanel({
+  projectId, dir, canPropose, onPlan,
+}: {
+  projectId: string;
+  dir: string;
+  /** There is something missing that an agent could propose closing. */
+  canPropose: boolean;
+  /** Hands a drafted plan to the screen's own preview — the one a human confirms. */
+  onPlan: (plan: Plan & { types: string[]; ha: boolean }, from: string) => void;
+}) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agent, setAgent] = useState('');
   const [draft, setDraft] = useState('');
@@ -61,6 +70,45 @@ export function ChatPanel({ projectId, dir }: { projectId: string; dir: string }
     } catch (e) {
       // A failed agent is shown as a turn, not swallowed: which agent failed and why is part
       // of the conversation, and it is usually the answer to "why is this empty".
+      setTurns((t) => [...t, {
+        id: nextId.current++, who: 'agent', agentId: agent,
+        label: agents?.find((a) => a.id === agent)?.label ?? agent,
+        text: (e as Error).message, failed: true,
+      }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Ask the agent to draft the fix.
+   *
+   * What comes back is a list of service types, not a file. The daemon runs them through the
+   * same planner the button uses and hands the result to the preview the human confirms — so
+   * this button costs the agent an opinion and gains it no authority.
+   */
+  const propose = async () => {
+    if (busy || agent === '' || projectId === '') return;
+    setBusy(true);
+    setTurns((t) => [...t, { id: nextId.current++, who: 'you', text: 'Draft a fix for what is missing.' }]);
+    try {
+      const r = await api.propose(agent, projectId, dir, false);
+      const lines = r.plan === null
+        ? [r.note ?? 'Nothing proposed.']
+        : [
+          `Proposed ${r.proposal.types.length}: ${r.proposal.types.join(', ')}`,
+          ...r.proposal.types.map((t) => `  ${t} — ${r.proposal.why[t] ?? 'no reason given'}`),
+          '',
+          'Drafted into the preview above. Nothing is created until you confirm it.',
+        ];
+      if (r.proposal.rejected.length > 0) {
+        lines.push('', `Discarded (not a Zerops service type): ${r.proposal.rejected.join(', ')}`);
+      }
+      setTurns((t) => [...t, {
+        id: nextId.current++, who: 'agent', agentId: agent, label: r.agent, text: lines.join('\n'), ms: r.ms,
+      }]);
+      if (r.plan !== null) onPlan({ ...r.plan, types: r.proposal.types, ha: false }, r.agent);
+    } catch (e) {
       setTurns((t) => [...t, {
         id: nextId.current++, who: 'agent', agentId: agent,
         label: agents?.find((a) => a.id === agent)?.label ?? agent,
@@ -191,11 +239,16 @@ export function ChatPanel({ projectId, dir }: { projectId: string; dir: string }
           multiline
           onSubmitEditing={() => void send(draft)}
         />
-        <Btn
-          primary
-          label={busy ? 'thinking…' : 'Ask'}
-          onPress={() => void send(draft)}
-        />
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <View style={{ flex: 1 }}>
+            <Btn primary label={busy ? 'thinking…' : 'Ask'} onPress={() => void send(draft)} />
+          </View>
+          {canPropose && (
+            <View style={{ flex: 1 }}>
+              <Btn label="Draft a fix" onPress={() => void propose()} />
+            </View>
+          )}
+        </View>
       </View>
     </View>
   );

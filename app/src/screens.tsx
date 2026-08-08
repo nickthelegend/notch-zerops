@@ -585,7 +585,12 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
 
       {chatOpen && (
         <View style={{ width: 400 }}>
-          <ChatPanel projectId={projectId} dir={dir.trim()} />
+          <ChatPanel
+            projectId={projectId}
+            dir={dir.trim()}
+            canPropose={missing.length > 0}
+            onPlan={(p, from) => { setPlan(p); setNotice(`${from} drafted this. Nothing is created until you confirm it.`); }}
+          />
         </View>
       )}
       </View>

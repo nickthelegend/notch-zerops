@@ -17,10 +17,20 @@
  */
 
 /** A Zerops managed-service type this repo appears to need. */
-export type ServiceType =
-  | 'postgresql' | 'mariadb' | 'valkey' | 'elasticsearch' | 'meilisearch' | 'typesense'
-  | 'qdrant' | 'nats' | 'kafka' | 'clickhouse' | 'objectstorage'
-  | 'nodejs' | 'python' | 'php' | 'go' | 'rust' | 'java' | 'dotnet' | 'ruby' | 'elixir' | 'bun' | 'deno' | 'static';
+/**
+ * Every service this app knows how to reason about.
+ *
+ * Exported as a value, not only a type, because it is also the closed vocabulary an agent is
+ * allowed to propose from — a suggestion outside this list is discarded rather than passed to
+ * the planner. One list, so the two can never disagree.
+ */
+export const SERVICE_TYPES = [
+  'postgresql', 'mariadb', 'valkey', 'elasticsearch', 'meilisearch', 'typesense',
+  'qdrant', 'nats', 'kafka', 'clickhouse', 'objectstorage',
+  'nodejs', 'python', 'php', 'go', 'rust', 'java', 'dotnet', 'ruby', 'elixir', 'bun', 'deno', 'static',
+] as const;
+
+export type ServiceType = (typeof SERVICE_TYPES)[number];
 
 export interface Evidence {
   /** The file that says so. */
