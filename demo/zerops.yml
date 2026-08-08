@@ -1,0 +1,26 @@
+# How this app is built and run on Zerops.
+#
+# NOT the same file as the `zerops.yaml` Notch exports. That one is an IMPORT file — the list
+# of services a project should contain. This is the BUILD file: how the code in this repository
+# turns into a running container. Both are called zerops-something and they are routinely
+# confused; the import file describes infrastructure, this describes a deployment.
+#
+# `zcli push` reads this, so Notch's deploy step needs nothing beyond the file already in the
+# repo — which is the point. Notch does not invent a build; it uses the one you committed.
+zerops:
+  - setup: nodejs
+    build:
+      base: nodejs@24
+      # `npm install`, not `npm ci`: this fixture ships no lockfile, and ci fails without one.
+      buildCommands:
+        - npm install --omit=dev
+      deployFiles:
+        - src
+        - package.json
+        - node_modules
+    run:
+      base: nodejs@24
+      ports:
+        - port: 3000
+          httpSupport: true
+      start: node src/server.js

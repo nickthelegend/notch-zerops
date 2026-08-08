@@ -37,6 +37,9 @@ export const EVENT_KINDS = [
   'yaml_exported',
   'agent_answered',
   'agent_proposed',
+  'deploy_started',
+  'deploy_succeeded',
+  'deploy_failed',
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

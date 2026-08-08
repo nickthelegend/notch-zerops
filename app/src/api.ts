@@ -169,6 +169,9 @@ export const api = {
   history: (projectId: string) => call<{ events: BrainEvent[]; byKind: Array<{ kind: string; count: number }> }>(`/api/history?projectId=${encodeURIComponent(projectId)}`),
   compare: (a: string, b: string) =>
     call<Comparison>(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
+  deploy: (projectId: string, dir: string, setup: string) =>
+    call<{ ok: boolean; ms: number; url: string | null; log: string[]; note?: string; service: string }>(
+      '/api/deploy', json({ projectId, dir, setup })),
   agents: () => call<{ agents: AgentInfo[] }>('/api/agents'),
   propose: (agent: string, projectId: string, dir: string, ha: boolean) =>
     call<{

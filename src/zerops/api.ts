@@ -265,6 +265,55 @@ export class ZeropsClient {
     return ZProjectSchema.parse(raw);
   }
 
+  /**
+   * Turn on the `*.zerops.app` subdomain for a service.
+   *
+   * `enableSubdomainAccess: true` in an import file does NOT reliably produce one — the
+   * service came back with `subdomainAccess: false` every time, and a deploy that works but
+   * hands back no address is indistinguishable from a broken one to the person watching. This
+   * is the route that actually does it, found by probing: `PUT …/enable-subdomain-access`
+   * answers 200 where the two neighbouring spellings both 404.
+   *
+   * Idempotent from the caller's side: only invoked when the service reports it is off.
+   */
+  async enableSubdomain(serviceId: string): Promise<unknown> {
+    return this.call('PUT', `/service-stack/${encodeURIComponent(serviceId)}/enable-subdomain-access`, {});
+  }
+
+  /**
+   * The public URL of a service, built from the platform's own template.
+   *
+   * Zerops publishes the pattern on every project as `zeropsSubdomainString`
+   * (`https://${hostname}-${zeropsSubdomainHost}-${port}.prg1.zerops.app`) together with the
+   * host fragment that fills it. So the address is DERIVED from what the platform says rather
+   * than guessed from a format string hard-coded here — which matters, because the region in
+   * that template differs per project and a hard-coded `prg1` would silently produce a URL
+   * that 404s for anyone in another region.
+   *
+   * This is the one place `content` is read off an env var, and only for these two keys. They
+   * are public routing information, not credentials: the whole point of a subdomain is that
+   * strangers can reach it.
+   */
+  async publicUrl(projectId: string, hostname: string, port: number): Promise<string | null> {
+    const raw = await this.search<Record<string, unknown>>('/project/search', [
+      { name: 'id', operator: 'eq', value: projectId },
+    ]);
+    const project = raw[0];
+    if (project === undefined) return null;
+    const env = Array.isArray(project['envList']) ? project['envList'] as Array<Record<string, unknown>> : [];
+    const get = (k: string): string | null => {
+      const hit = env.find((e) => e['key'] === k);
+      return typeof hit?.['content'] === 'string' ? hit['content'] : null;
+    };
+    const template = get('zeropsSubdomainString');
+    const host = get('zeropsSubdomainHost');
+    if (template === null || host === null) return null;
+    return template
+      .replace('${hostname}', hostname)
+      .replace('${zeropsSubdomainHost}', host)
+      .replace('${port}', String(port));
+  }
+
   /** Delete a project and everything in it. Used to clean up after a demo. */
   async deleteProject(projectId: string): Promise<unknown> {
     return this.call('DELETE', `/project/${encodeURIComponent(projectId)}`);

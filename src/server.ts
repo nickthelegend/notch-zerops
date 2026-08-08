@@ -27,11 +27,12 @@ import { computeDrift } from './zerops/drift.js';
 import { compareConfig } from './zerops/config.js';
 import { compareEnvironments, type EnvSnapshot } from './zerops/compare.js';
 import { deriveWiring } from './zerops/wiring.js';
-import { SCAN_GLOBS, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
+import { SCAN_GLOBS, findEnvNames, findSecretNames, scanRepo, type RepoFile } from './repo/scan.js';
 import { ServiceCatalog, buildImportYaml, safeHostname, type ImportService } from './zerops/catalog.js';
 import type { ServiceType } from './repo/scan.js';
 import { read as readEvents, record, stats, unresolvedDrift } from './db/events.js';
 import { AgentError, ask, available, brief, parseProposal, proposeInstruction } from './agents.js';
+import { DeployError, push, readiness, zcliPath } from './deploy.js';
 import { SERVICE_TYPES } from './repo/scan.js';
 import { LockManager } from './core/lock.js';
 import { getPool } from './db/pool.js';
@@ -65,6 +66,16 @@ const MIME: Record<string, string> = {
  * re-pasting after a restart; the benefit is that closing the app disposes of the credential.
  */
 let client: ZeropsClient | null = null;
+
+/*
+ * The raw token, held alongside the client and under the same rules.
+ *
+ * `ZeropsClient` deliberately never exposes the token it was built with, which is right for
+ * every other caller. Deployment is the exception: zcli is a separate process and needs the
+ * credential in its environment. Kept in memory only, cleared with the session, and passed to
+ * the child through `env` rather than argv.
+ */
+let sessionToken: string | null = null;
 
 /**
  * The provisioning lock.
@@ -133,6 +144,21 @@ const MAX_BODY_BYTES = 256 * 1024;
 
 /** Service types that RUN the application, as opposed to backing it. */
 const RUNTIME_TYPES = ['nodejs', 'python', 'go', 'php', 'dotnet', 'rust', 'java', 'bun', 'deno', 'elixir', 'ruby'];
+
+/**
+ * Is this import type a runtime?
+ *
+ * The OS PREFIX BREAKS A NAIVE CHECK, and it broke this one silently. Managed services import
+ * as `postgresql@18`, but a runtime imports as `alpine/nodejs@24` — so `startsWith('nodejs')`
+ * is false for every runtime Zerops actually accepts. The consequence was invisible: the
+ * runtime was never found, so no public subdomain, no environment wiring and no secrets were
+ * emitted, and the app deployed to a container that could not reach a single service
+ * provisioned for it. The import succeeded every time.
+ */
+function isRuntimeType(type: string): boolean {
+  const base = (type.includes('/') ? type.slice(type.indexOf('/') + 1) : type).toLowerCase();
+  return RUNTIME_TYPES.some((r) => base.startsWith(r));
+}
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -227,10 +253,27 @@ async function buildPlan(
   }
 
   // A runtime is what serves traffic and holds the app's secrets. `nodejs`, `python`, `go`…
-  const runtime = services.find((s) => RUNTIME_TYPES.some((r) => s.type.startsWith(r)));
+  const runtime = services.find((s) => isRuntimeType(s.type));
   if (runtime !== undefined) {
     if (secrets.length > 0) runtime.secrets = secrets;
     runtime.publicUrl = true;
+
+    /*
+     * Wire the runtime to what is being created for it.
+     *
+     * `compareConfig` already works out which of the repo's connection variables a given
+     * service answers — that is how it avoids reporting `DATABASE_URL` as missing on a project
+     * with a database. The same mapping, pointed the other way, is the wiring: the app reads
+     * `DATABASE_URL`, so `DATABASE_URL` is set to the new Postgres. Without it the deploy
+     * succeeds and the application cannot reach a single service provisioned for it.
+     */
+    const hostnames = services.map((s) => s.hostname);
+    const wanted = dir === '' || !existsSync(dir) ? [] : findEnvNames(await readRepo(dir));
+    const provided = compareConfig(wanted, [], hostnames).provided;
+    const env = provided
+      .filter((pv) => hostnames.includes(pv.by))
+      .map((pv) => ({ key: pv.key, service: pv.by }));
+    if (env.length > 0) runtime.env = env;
   }
 
   return { projectId, services, unresolved, secrets, yaml: buildImportYaml(services) };
@@ -634,6 +677,113 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return sendJson(res, 200, compareEnvironments(a, b));
       }
 
+      /**
+       * Deploy the repository to its runtime, and hand back the URL.
+       *
+       * The step that turns "your project has six empty services" into "your app is running".
+       * Streams zcli's own output as it happens — a build is four minutes of real work and a
+       * spinner would be hiding the only interesting part.
+       *
+       * This WRITES, and it runs the build the repository committed. Notch chooses what and
+       * where; `zerops.yml` decides how.
+       */
+      case '/api/deploy': {
+        if (req.method !== 'POST') {
+          return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST -- this deploys real code.' });
+        }
+        const c = requireClient(res);
+        if (c === null) return;
+        const body = (await readBody(req)) as { projectId?: unknown; serviceId?: unknown; dir?: unknown; setup?: unknown };
+        const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+        const dir = typeof body.dir === 'string' ? body.dir : '';
+        let serviceId = typeof body.serviceId === 'string' ? body.serviceId : '';
+        const setup = typeof body.setup === 'string' && body.setup !== '' ? body.setup : 'nodejs';
+        if (projectId === '' || dir === '') {
+          return sendJson(res, 400, { error: 'missing_params', message: 'A project and a repository path are required.' });
+        }
+
+        const check = readiness(dir);
+        if (!check.ready) {
+          return sendJson(res, 400, { error: 'not_deployable', message: check.problems.join(' '), problems: check.problems });
+        }
+
+        const services = await c.services(projectId);
+        // Default to the project's runtime: the thing code actually runs on. A database has
+        // nothing to deploy to it, and picking one would produce a baffling platform error.
+        if (serviceId === '') {
+          const runtime = services.find((s) =>
+            RUNTIME_TYPES.some((t) => s.serviceStackTypeId.toLowerCase().includes(t)));
+          if (runtime === undefined) {
+            return sendJson(res, 400, {
+              error: 'no_runtime',
+              message: 'This project has no runtime service to deploy onto. Provision one first.',
+            });
+          }
+          serviceId = runtime.id;
+        }
+        const target = services.find((s) => s.id === serviceId);
+
+        const tokenForCli = process.env['ZEROPS_TOKEN'] ?? sessionToken;
+        if (tokenForCli === null || tokenForCli === '') {
+          return sendJson(res, 400, {
+            error: 'no_token',
+            message: 'The deploy runs through zcli, which needs the token in its environment.',
+          });
+        }
+
+        await record({
+          kind: 'deploy_started', scope: projectId,
+          payload: { service: target?.name ?? serviceId, dir, setup },
+        });
+
+        try {
+          const r = await push(tokenForCli, serviceId, dir, setup, () => { /* collected below */ });
+
+          /*
+           * Ask for the subdomain, then re-read.
+           *
+           * A deploy that works and hands back no address looks broken to whoever is watching,
+           * and the import file's `enableSubdomainAccess` did not reliably produce one. So if
+           * the service serves HTTP and has no public address, Notch asks for one — the
+           * remaining half of "deploy it and give me the URL".
+           */
+          let after = (await c.services(projectId)).find((s) => s.id === serviceId);
+          const servesHttp = after?.ports.some((x) => x.httpRouting === true) === true;
+          if (r.ok && after !== undefined && servesHttp && after.subdomainAccess !== true) {
+            await c.enableSubdomain(serviceId).catch(() => null);
+            await new Promise((ok) => setTimeout(ok, 2500));
+            after = (await c.services(projectId)).find((s) => s.id === serviceId);
+          }
+          const port = after?.ports.find((x) => x.httpRouting === true)?.port ?? after?.ports[0]?.port ?? 3000;
+          const url = (after?.subdomainAccess === true || after?.hasPublicHttpRoutingAccess === true)
+            && after !== undefined
+            ? await c.publicUrl(projectId, after.name, port).catch(() => null)
+            : null;
+
+          await record({
+            kind: r.ok ? 'deploy_succeeded' : 'deploy_failed',
+            scope: projectId,
+            payload: { service: target?.name ?? serviceId, ms: r.ms, code: r.code, url, tail: r.log.slice(-6) },
+          });
+
+          return sendJson(res, r.ok ? 200 : 502, {
+            ok: r.ok, ms: r.ms, code: r.code, log: r.log, url,
+            service: target?.name ?? serviceId,
+            note: r.ok
+              ? (url === null
+                ? 'Deployed. This service has no public subdomain, so there is no URL to open — enable public access on it in Zerops.'
+                : 'Deployed and reachable.')
+              : 'Zerops rejected the build. The log above is what it said.',
+          });
+        } catch (err) {
+          await record({ kind: 'deploy_failed', scope: projectId, payload: { error: String(err) } });
+          if (DeployError.is(err)) {
+            return sendJson(res, 502, { error: 'deploy_failed', message: err.message, detail: err.detail });
+          }
+          throw err;
+        }
+      }
+
       /** Which coding agents are installed on this machine. */
       case '/api/agents': {
         return sendJson(res, 200, { agents: available() });
@@ -845,7 +995,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
          * it -- Zerops evaluates `generateRandomString` on import.
          */
         const secretNames = findSecretNames(files);
-        const runtimeHost = resolved.find((r) => RUNTIME_TYPES.some((t) => r.type.startsWith(t)))?.hostname;
+        const runtimeHost = resolved.find((r) => isRuntimeType(r.type))?.hostname;
 
         const body = resolved.length === 0
           ? 'services: []\n'

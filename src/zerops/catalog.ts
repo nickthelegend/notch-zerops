@@ -173,6 +173,16 @@ export interface ImportService {
   secrets?: readonly string[];
   /** Give the service a public `*.zerops.app` URL. Only meaningful for a runtime. */
   publicUrl?: boolean;
+  /**
+   * The wiring: the repo's own variable name → the service that answers it.
+   *
+   * Creating a database does not tell the application where it is. Zerops publishes each
+   * managed service's address as `<hostname>_connectionString` on the project, but a runtime
+   * reads whatever name the code reads — `DATABASE_URL`, `REDIS_URL` — and nothing connects the
+   * two until somebody says so. Without this the app deploys, starts, answers health checks,
+   * and cannot reach a single one of the services provisioned for it.
+   */
+  env?: ReadonlyArray<{ key: string; service: string }>;
 }
 
 /**
@@ -192,6 +202,11 @@ export function buildImportYaml(services: ReadonlyArray<ImportService>): string 
     lines.push(`    type: ${s.type}`);
     lines.push(`    mode: ${s.mode}`);
     if (s.publicUrl === true) lines.push('    enableSubdomainAccess: true');
+    if (s.env !== undefined && s.env.length > 0) {
+      // `${hostname_connectionString}` is Zerops' own reference syntax, resolved on import.
+      lines.push('    envVariables:');
+      for (const e of s.env) lines.push(`      ${e.key}: \${${e.service}_connectionString}`);
+    }
     if (s.secrets !== undefined && s.secrets.length > 0) {
       lines.push('    envSecrets:');
       for (const k of s.secrets) lines.push(`      ${k}: <@generateRandomString(<32>)>`);

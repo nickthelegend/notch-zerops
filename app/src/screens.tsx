@@ -94,6 +94,7 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   const [chatOpen, setChatOpen] = useState(true);
   const [against, setAgainst] = useState('');
   const [comparison, setComparison] = useState<Comparison | null>(null);
+  const [deployed, setDeployed] = useState<{ url: string | null; note: string } | null>(null);
 
   /** In-flight guard in a ref: `setBusy(true)` has not landed when a second tap arrives. */
   const inFlight = useRef(false);
@@ -112,8 +113,25 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
   /** Findings belong to the project they came from. A switch makes them wrong, not stale. */
   useEffect(() => {
     setDrift(null); setPlan(null); setCreated(null); setEvents(null); setError(null); setNotice(null);
-    setComparison(null); setAgainst('');
+    setComparison(null); setAgainst(''); setDeployed(null);
   }, [projectId]);
+
+  /**
+   * Push the repository to its runtime.
+   *
+   * The step that turns "your project has six empty services" into "your app is running at
+   * this address". It runs the build the repository committed — Notch chooses what and where,
+   * `zerops.yml` decides how.
+   */
+  const deploy = () => void guard(async () => {
+    if (dir.trim() === '' || projectId === '') return;
+    setError(null); setDeployed(null);
+    try {
+      const r = await api.deploy(projectId, dir.trim(), 'nodejs');
+      setDeployed({ url: r.url, note: r.note ?? '' });
+      setEvents((await api.history(projectId)).events);
+    } catch (e) { setError((e as Error).message); }
+  });
 
   /** Compare this project against another one on the account. */
   const compare = (otherId: string) => void guard(async () => {
@@ -268,6 +286,9 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
             <Btn small label="Choose…" onPress={() => { void pickFolder().then((p) => { if (p !== null) setDir(p); }); }} />
           )}
           <Btn small primary label={busy ? '…' : 'Scan repo'} onPress={scan} />
+          {dir.trim() !== '' && projectId !== '' && (
+            <Btn small label={busy ? 'deploying…' : 'Deploy'} onPress={deploy} />
+          )}
           <Btn small label="Refresh" onPress={() => void loadGraph(projectId)} />
           {dir.trim() !== '' && projectId !== '' && (
             <Btn
@@ -320,6 +341,24 @@ export function ProjectScreen({ session, onDisconnect }: { session: Session; onD
       {/* ---- banners ---- */}
       {error !== null && <View style={{ padding: spacing.md }}><Callout label="ERROR" text={error} tint={T.err} /></View>}
       {notice !== null && <View style={{ padding: spacing.md }}><Callout label="CREATED" text={notice} tint={T.ok} /></View>}
+      {deployed !== null && (
+        <View style={{ padding: spacing.md }}>
+          <Panel tint={deployed.url === null ? T.warn : T.ok}>
+            <SectionLabel text={deployed.url === null ? 'DEPLOYED' : 'DEPLOYED AND REACHABLE'} />
+            <View style={{ paddingHorizontal: spacing.md, paddingBottom: spacing.md, gap: 6 }}>
+              {deployed.url !== null && (
+                <Text
+                  onPress={() => void Linking.openURL(deployed.url as string)}
+                  style={{ color: T.thread, fontFamily: T.mono, fontSize: 13 }}
+                >
+                  {deployed.url}
+                </Text>
+              )}
+              <Text style={{ color: T.dim, fontSize: 12.5, lineHeight: 18 }}>{deployed.note}</Text>
+            </View>
+          </Panel>
+        </View>
+      )}
       {created !== null && <View style={{ padding: spacing.md }}><Callout label="PROVISIONED" text={created} tint={T.ok} /></View>}
 
       {/* ---- plan ---- */}

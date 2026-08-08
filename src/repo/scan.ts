@@ -267,6 +267,22 @@ const NOT_SECRET = /(PUBLIC|PUBLISHABLE)/i;
 
 const PLATFORM_INJECTED = /(_URL|_URI|_HOST|_PORT|_DSN)$/i;
 
+/**
+ * Every environment variable name the repo declares.
+ *
+ * Names only, like everything else that touches env files here. Used to work out which
+ * connection variables a new runtime needs pointed at which service.
+ */
+export function findEnvNames(files: readonly RepoFile[]): string[] {
+  const out = new Set<string>();
+  for (const f of files) {
+    const name = base(f.path);
+    if (name !== '.env' && name !== '.env.example' && !name.startsWith('.env.')) continue;
+    for (const v of envNames(f.content)) out.add(v);
+  }
+  return [...out].sort();
+}
+
 export function findSecretNames(files: readonly RepoFile[]): string[] {
   const out = new Set<string>();
   for (const f of files) {
