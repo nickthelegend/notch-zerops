@@ -188,7 +188,12 @@ async function verifyCapture() {
   const b = fingerprint(ref);
   const mad = a.reduce((s, v, i) => s + Math.abs(v - b[i]), 0) / a.length;
   console.log(`preflight: captured-vs-rendered difference ${mad.toFixed(1)} (0 = identical)`);
-  if (mad > 28) {
+  /*
+   * 12, not 28. A take that captured a completely different window scored 22.2 and was waved
+   * through by the looser bound — the screen and the renderer have to MATCH, and a good take
+   * scores under 1. Anything in double figures is a different picture.
+   */
+  if (mad > 12) {
     throw new Error(
       `the capture does not show the app (difference ${mad.toFixed(1)}).\n` +
       `  Something is covering the window, or it is on another Space.\n` +
@@ -198,9 +203,21 @@ async function verifyCapture() {
 
 /* ---------------------------------------------------------------- record */
 
-// Bring the window forward and keep the machine awake for the whole take.
-sh('osascript', ['-e', 'tell application "Electron" to activate']);
-await sleep(1200);
+/*
+ * Front THIS Electron bundle, by path.
+ *
+ * `open -a Electron` and `tell application "Electron"` both name an app class, and the editor
+ * this was written in is also Electron — a take got fronted onto the wrong one and recorded a
+ * source file for five minutes. The bundle path is unambiguous.
+ */
+const BUNDLE = process.env.NOTCH_APP_BUNDLE
+  ?? join(HERE, '..', '..', 'desktop', 'node_modules', 'electron', 'dist', 'Electron.app');
+sh('open', ['-a', BUNDLE]);
+await sleep(1800);
+
+// A floating recorder toolbar draws OVER the window and lands in the middle of the frame.
+sh('pkill', ['-x', 'TapRecord']);
+await sleep(600);
 const awake = spawn('caffeinate', ['-dimsu'], { stdio: 'ignore', detached: false });
 
 await verifyCapture();
@@ -236,6 +253,52 @@ try { awake.kill(); } catch { /* already gone */ }
 writeFileSync(join(OUT, 'marks.json'), JSON.stringify({
   crop: CROP, wallMs: wall, failure, marks: done?.marks ?? marks,
 }, null, 1));
+
+/*
+ * DID THE PICTURE ACTUALLY CHANGE?
+ *
+ * A take once completed with every mark logged and `failure: null`, and the footage was the
+ * same frozen frame for five minutes — the driver talks to the renderer over CDP, which works
+ * whether or not the window is being composited to the screen, so nothing upstream can notice.
+ * The only proof that a recording recorded anything is that consecutive frames differ.
+ *
+ * Sampled at eight points; if they are all near-identical the take is worthless and saying so
+ * here is far cheaper than finding out during the edit.
+ */
+const frameAt = (t) => {
+  const buf = execFileSync('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', join(OUT, 'raw.mp4'),
+    '-frames:v', '1', '-vf', 'scale=16:16,format=gray', '-f', 'rawvideo', '-'], { maxBuffer: 1 << 20 });
+  return [...buf];
+};
+const rawSeconds = Number(execFileSync('ffprobe',
+  ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', join(OUT, 'raw.mp4')],
+  { encoding: 'utf8' }).trim());
+/*
+ * EVERY stretch has to change, not just one.
+ *
+ * The first version took the largest difference across the whole take, and passed a recording
+ * whose screen froze at the one-third mark: the early beats moved, the maximum was therefore
+ * large, and two thirds of the finished video was a still frame while the app — provably, from
+ * the event log and the account — went on creating real services. A partial freeze is the
+ * likely failure, so the test is per-interval.
+ */
+const N = 16;
+const points = Array.from({ length: N }, (_, i) => (rawSeconds * (i + 0.5)) / N);
+const prints = points.map(frameAt);
+const diffs = prints.slice(1).map((p, i) =>
+  p.reduce((s, v, k) => s + Math.abs(v - prints[i][k]), 0) / p.length);
+const frozen = diffs.filter((d) => d < 2).length;
+console.log(
+  `motion check: ${diffs.length - frozen}/${diffs.length} intervals show movement ` +
+  `(min ${Math.min(...diffs).toFixed(1)}, max ${Math.max(...diffs).toFixed(1)})`);
+if (frozen > diffs.length / 4) {
+  console.error(
+    `\nTHE PICTURE STOPPED CHANGING for ${frozen} of ${diffs.length} intervals. The window was ` +
+    'not being repainted to the screen for part of the take, even though the driver ran ' +
+    'correctly and the app did the work. Re-record with the Notch window frontmost and nothing ' +
+    'stealing focus.');
+  process.exit(3);
+}
 
 console.log(`\ntake: ${(wall / 1000).toFixed(1)}s, ${marks.length} marks -> ${join(OUT, 'marks.json')}`);
 if (failure !== null) process.exit(1);

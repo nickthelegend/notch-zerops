@@ -216,7 +216,7 @@
   /* --------------------------------------------------------------- take */
 
   async function run() {
-    // 01 — the gate, untouched.
+    // 01 — the gate.
     line('01-intro');
     await glide(innerWidth * 0.5, innerHeight * 0.55, 1400);
     await hold();
@@ -224,138 +224,113 @@
     // 02 — the token.
     line('02-token');
     await typeInto(document.querySelector('input'), CFG.token, 30);
-    await hold();
-
-    // 03 — connect for real.
-    line('03-connected');
     await clickText('Connect', { settle: 200 });
     await until('the dashboard', () => /New project/.test(text()), 60000);
-    await glide(innerWidth * 0.5, 150, 900);
     await hold();
 
-    // 04 — create a real project.
-    line('04-create');
+    // 03 — a real, empty project.
+    line('03-create');
     await clickText('New project', { settle: 600 });
     await until('the create form', () => /CREATE AN EMPTY PROJECT/.test(text()));
-    const nameField = [...document.querySelectorAll('input')]
-      .find((i) => (i.placeholder || '').includes('project name'));
-    await typeInto(nameField, CFG.project);
+    await typeInto([...document.querySelectorAll('input')]
+      .find((i) => (i.placeholder || '').includes('project name')), CFG.project);
     await clickText('Create', { settle: 400 });
     await until('the new project', () => text().includes(CFG.project), 120000);
     await hold();
 
-    // 05 — point at the repository.
-    line('05-picker');
-    const dirField = [...document.querySelectorAll('input')]
-      .find((i) => (i.placeholder || '').includes('/path'));
-    await typeInto(dirField, CFG.repo, 42);
+    // 04 — point at the repository.
+    line('04-picker');
+    await typeInto([...document.querySelectorAll('input')]
+      .find((i) => (i.placeholder || '').includes('/path')), CFG.repo, 42);
     await hold();
 
-    // 06 — scan.
-    line('06-scan');
+    // 05 — scan, and the gaps land on the board.
+    line('05-scan');
     await clickText('Scan repo', { settle: 200 });
-    /*
-     * The completion signal is the app's OWN state, not a word that happens to be on screen.
-     * A first attempt waited for /MISSING/ — the uppercase metric-card label, which lives on
-     * the Drift tab while this beat is on the Architecture tab. The scan had in fact finished
-     * every time; the take failed anyway, waiting for text that was never going to appear
-     * here. The tab counter is rendered from the same state the scan produces and is visible
-     * from every tab.
-     */
     await until('the scan', () => /Drift \(\d+\)/.test(text()), 120000);
-    await glide(innerWidth * 0.42, innerHeight * 0.5, 900);
+    await glide(innerWidth * 0.30, innerHeight * 0.45, 1200);
+    await glide(innerWidth * 0.52, innerHeight * 0.60, 1500);
     await hold();
 
-    // 07 — the ghosts on the canvas.
-    line('07-ghosts');
-    await glide(innerWidth * 0.24, innerHeight * 0.62, 1600);
-    await glide(innerWidth * 0.62, innerHeight * 0.42, 1800);
-    await hold();
-
-    // 08 — evidence.
-    line('08-evidence');
+    // 06 — the evidence.
+    line('06-evidence');
     await click(byTextRe(/^Drift \(\d+\)$/), { settle: 500 });
     const pane = document.scrollingElement ?? document.documentElement;
-    await glide(innerWidth * 0.5, innerHeight * 0.55, 800);
-    for (let i = 0; i < 4; i += 1) { pane.scrollTop += 150; await sleep(420); }
-    await hold();
-
-    /*
-     * 09 — the claim only a stored history can make, EARNED ON CAMERA.
-     *
-     * The streak line needs more than one scan of this project, and the project was created a
-     * minute ago in beat 04. Rather than narrate over a number that is not there, the demo
-     * scans a second time and the line appears because it became true.
-     */
-    line('09-history');
     pane.scrollTop = 0;
-    await sleep(300);
-    await clickText('Scan repo', { settle: 300 });
-    await until('the second scan to be recorded', () => /Missing across 2 scans/.test(text()), 120000);
-    await click(byTextRe(/^Drift \(\d+\)$/), { settle: 400 });
-    for (let i = 0; i < 3; i += 1) { pane.scrollTop += 140; await sleep(450); }
+    await glide(innerWidth * 0.4, innerHeight * 0.6, 900);
+    for (let i = 0; i < 4; i += 1) { pane.scrollTop += 170; await sleep(500); }
     await hold();
 
-    // 10 — the import file, before anything is written.
+    // 07 — config drift: the quiet failure.
+    line('07-config');
+    pane.scrollTop = 0;
+    await sleep(500);
+    await glide(innerWidth * 0.4, innerHeight * 0.38, 1000);
+    await hold();
+
+    // 08 — the agents already on this machine.
+    line('08-agent');
+    await glide(innerWidth * 0.88, innerHeight * 0.12, 1100);
+    await glide(innerWidth * 0.93, innerHeight * 0.12, 900);
+    await glide(innerWidth * 0.86, innerHeight * 0.30, 1200);
+    await hold();
+
+    // 09 — ask one to draft the fix. Real agent, real repo.
+    line('09-draft');
+    await clickText('Draft a fix', { settle: 400 });
+    await hold();
+
+    // 10 — what it drafted, in the preview a human confirms.
     line('10-plan');
-    pane.scrollTop = 0;
-    await sleep(400);
-    await click(byTextRe(/^Provision \d+ missing…$/), { settle: 600 });
-    await until('the import file', () => /THIS WILL CREATE/.test(text()), 120000);
-    await hold();
-
-    // 11 — the secrets, as generator expressions.
-    line('11-secrets');
+    await until('the drafted plan', () => /THIS WILL CREATE/.test(text()), 240000);
     const pre = [...document.querySelectorAll('div')]
       .find((e) => e.textContent.startsWith('services:') && e.children.length === 0);
     let sc = pre;
     while (sc && sc.scrollHeight <= sc.clientHeight + 4) sc = sc.parentElement;
-    if (sc) {
-      const to = sc.scrollHeight;
-      for (let i = 1; i <= 24; i += 1) { sc.scrollTop = (to * i) / 24; await sleep(70); }
-    }
-    await glide(innerWidth * 0.45, innerHeight * 0.3, 1200);
+    if (sc) { const to = sc.scrollHeight; for (let i = 1; i <= 20; i += 1) { sc.scrollTop = (to * i) / 20; await sleep(80); } }
+    await glide(innerWidth * 0.4, innerHeight * 0.25, 1100);
     await hold();
 
-    // 12 — write it.
-    line('12-provision');
+    // 11 — write it.
+    line('11-provision');
     await clickText('Confirm and create', { settle: 200 });
     await hold();
 
-    // 13 — Zerops is creating six services; no narration over the wait.
-    silent('13-wait');
+    // 12 — the result.
+    silent('11-wait');
     await until('Zerops to accept the import', () => /Zerops accepted the import/.test(text()), 300000);
-    await sleep(600);
-
-    line('13-after');
+    await sleep(700);
+    line('12-after');
     await hold();
 
-    // 14 — the architecture, re-read from the platform.
-    line('14-arch');
-    await clickText('Architecture', { settle: 500 });
-    await glide(innerWidth * 0.3, innerHeight * 0.4, 1500);
-    await glide(innerWidth * 0.6, innerHeight * 0.6, 1700);
+    // 13 — the view Zerops does not have.
+    line('13-envs');
+    await clickText('Environments', { settle: 500 });
+    await sleep(400);
+    const other = byTextRe(/^vs /);
+    if (other) await click(other, { settle: 600 });
+    await until('the comparison', () => /DIFFERENCES/.test(text()), 120000);
     await hold();
 
-    // 15 — the persisted timeline.
-    line('15-timeline');
-    await click(byTextRe(/^Timeline \(\d+\)$/), { settle: 500 });
-    await glide(innerWidth * 0.5, innerHeight * 0.45, 900);
-    for (let i = 0; i < 3; i += 1) { pane.scrollTop += 130; await sleep(600); }
+    // 14 — how it compares, and what it refuses to compare.
+    line('14-envs2');
+    for (let i = 0; i < 4; i += 1) { pane.scrollTop += 190; await sleep(520); }
     await hold();
 
-    // 16 — write the yaml to disk, for real.
-    line('16-export');
+    // 17 — the persisted history. (15 and 16 are the terminal take.)
+    line('17-timeline');
     pane.scrollTop = 0;
     await sleep(300);
-    await clickText('Export yaml', { settle: 400 });
-    await until('the file to be written', () => /Wrote /.test(text()), 60000);
+    await click(byTextRe(/^Timeline \(\d+\)$/), { settle: 500 });
+    await glide(innerWidth * 0.4, innerHeight * 0.45, 900);
+    for (let i = 0; i < 3; i += 1) { pane.scrollTop += 150; await sleep(600); }
     await hold();
 
-    // 17 — close on the architecture.
-    line('17-close');
+    // 18 — close on the board.
+    line('18-close');
+    pane.scrollTop = 0;
     await clickText('Architecture', { settle: 500 });
-    await glide(innerWidth * 0.45, innerHeight * 0.5, 1600);
+    await glide(innerWidth * 0.42, innerHeight * 0.5, 1600);
     await hold();
 
     log('DEMO_DONE ' + JSON.stringify({ ms: Math.round(performance.now() - T0), marks }));

@@ -2,103 +2,109 @@
  {
   "id": "01-intro",
   "file": "01-intro.wav",
-  "seconds": 18.84,
-  "text": "This is Notch. It's a desktop app that answers one question about your infrastructure: what does this repository actually need, and what is actually deployed? Everything you're about to see is running against a real Zerops account over the real API. Nothing here is mocked."
+  "seconds": 18.71,
+  "text": "Zerops deploys what you tell it to. Notch tells you what you forgot. This is a desktop app that holds your git repository against your live Zerops account and finds the difference. Everything here runs against a real account over the real API. Nothing is mocked."
  },
  {
   "id": "02-token",
   "file": "02-token.wav",
-  "seconds": 18.79,
-  "text": "It starts with a Zerops personal access token. Notch verifies it by making a real call, not by checking that it looks like a token. The token is held in the daemon's memory for this session only. It is never written to disk, never logged, and never sent anywhere but Zerops."
+  "seconds": 17.19,
+  "text": "It starts with a Zerops personal access token, verified by a real call rather than by checking that it looks like a token. It is held in the daemon's memory for this session only \u2014 never written to disk, never logged, never sent anywhere but Zerops."
  },
  {
-  "id": "03-connected",
-  "file": "03-connected.wav",
-  "seconds": 11.29,
-  "text": "We're in. Notch has read the account and found the projects on it. The bar across the top is the whole application: pick a project, point at a repository, and scan."
+  "id": "03-create",
+  "file": "03-create.wav",
+  "seconds": 13.4,
+  "text": "Let's start from nothing. Notch is explicit that this creates a real, billable project, and that it starts empty. Creating infrastructure and filling it are two different decisions, so they are two different buttons."
  },
  {
-  "id": "04-create",
-  "file": "04-create.wav",
-  "seconds": 15.55,
-  "text": "Let's start from nothing and create a project. Notch is explicit that this makes a real, billable project on your account, and that it starts empty. Creating infrastructure and filling it are two separate decisions, so they are two separate buttons."
+  "id": "04-picker",
+  "file": "04-picker.wav",
+  "seconds": 15.77,
+  "text": "Now point it at a repository. This one is a Node API that needs Postgres for records, Valkey for sessions, Meilisearch for search, Qdrant for embeddings, NATS for background jobs, and object storage for uploads."
  },
  {
-  "id": "05-picker",
-  "file": "05-picker.wav",
-  "seconds": 18.71,
-  "text": "Now the repository we want to deploy. Point Notch at any folder on this machine. In the desktop build there's also a real folder picker, and that is the only native capability the shell exposes \u2014 no file system access, no shell, just a path you chose yourself."
+  "id": "05-scan",
+  "file": "05-scan.wav",
+  "seconds": 17.92,
+  "text": "Notch reads the package manifest and the environment files and compares what it finds against what the project actually runs. Seven services missing \u2014 and they're drawn inside the project they're missing from, because a project with holes in it should look like a project with holes in it."
  },
  {
-  "id": "06-scan",
-  "file": "06-scan.wav",
-  "seconds": 21.06,
-  "text": "This is a Node API that needs Postgres for records, Valkey for sessions, Meilisearch for search, Qdrant for embeddings, NATS for jobs, and object storage for uploads. Notch reads the package manifest and the environment files, and compares what it finds against what the project actually runs."
+  "id": "06-evidence",
+  "file": "06-evidence.wav",
+  "seconds": 21.42,
+  "text": "Every finding cites the line that produced it. Meilisearch is here because the code imports the meilisearch client. Notch never asserts a requirement it cannot point at a file for, and anything inferred only from an environment variable name is marked low confidence, because a name is weaker evidence than an import."
  },
  {
-  "id": "07-ghosts",
-  "file": "07-ghosts.wav",
-  "seconds": 15.17,
-  "text": "Seven services missing, and they're drawn on the architecture canvas as dashed ghosts rather than hidden in a list. The gap between your repository and your infrastructure is a shape, and a shape is easier to act on than a bullet point."
+  "id": "07-config",
+  "file": "07-config.wav",
+  "seconds": 24.21,
+  "text": "And this is the failure that gets through every other check. Nine variables the code reads that this project does not define. A missing service fails loudly at deploy time. A missing variable does not: the image builds, the container starts, health checks pass, and the first request that needs a signing secret throws. Notch reads the names only \u2014 never the values."
  },
  {
-  "id": "08-evidence",
-  "file": "08-evidence.wav",
-  "seconds": 21.89,
-  "text": "Every finding cites its evidence. Meilisearch is here because the code depends on the meilisearch client in package dot json. Notch never asserts a requirement it cannot point at a line for, and anything inferred only from an environment variable name is marked low confidence, because a name is weaker evidence than an import."
+  "id": "08-agent",
+  "file": "08-agent.wav",
+  "seconds": 18.35,
+  "text": "Down the side are the coding agents already installed on this machine \u2014 Claude Code, Codex, OpenCode, Gemini. No API keys; Notch drives the ones you already pay for, and hands them the live state of the project, its gaps, and the evidence behind each one."
  },
  {
-  "id": "09-history",
-  "file": "09-history.wav",
-  "seconds": 23.08,
-  "text": "Now scan it a second time, and Notch says something a live view cannot: these have been missing across two scans, since the first time we looked. That a service is missing right now is something anyone can compute. That it has been missing since the last time you checked requires having written the earlier answer down. This is the reason Notch keeps a database at all."
+  "id": "09-draft",
+  "file": "09-draft.wav",
+  "seconds": 18.18,
+  "text": "So let's ask one to draft the fix. What comes back is not a file \u2014 it's a list of services with a reason for each. The daemon builds the actual import file, resolving versions from the live catalogue. The agent gets judgement about what and why, and no authority to act."
  },
  {
   "id": "10-plan",
   "file": "10-plan.wav",
-  "seconds": 15.77,
-  "text": "Provisioning shows you the exact import file before anything is written. A button that creates real infrastructure should never be the first time you learn what it creates, so the preview and the write are built by the same code and cannot drift apart."
+  "seconds": 25.05,
+  "text": "Here's what it drafted, in the same preview a human confirms. Notice object storage was proposed and is not in the file: the catalogue has no Zerops type for it, so the agent could ask for it but could not conjure one. The secrets are Zerops generator expressions, not values \u2014 the platform generates them during the import, so nothing is copied out of your repository."
  },
  {
-  "id": "11-secrets",
-  "file": "11-secrets.wav",
-  "seconds": 22.91,
-  "text": "Notch also found nine secrets by name in the environment files, and declared them on the runtime service. Look closely at the values: they are Zerops generator expressions, not secrets. The real values are generated by the platform during the import, so nothing is copied out of your repository and no secret ever appears in this file."
+  "id": "11-provision",
+  "file": "11-provision.wav",
+  "seconds": 4.63,
+  "text": "Confirm, and these are real services being created on a real account."
  },
  {
-  "id": "12-provision",
-  "file": "12-provision.wav",
-  "seconds": 6.51,
-  "text": "Confirm, and Notch sends the import. These are real services being created on a real account."
+  "id": "12-after",
+  "file": "12-after.wav",
+  "seconds": 8.49,
+  "text": "Six of the seven are satisfied. The seventh stays a ghost and says why, rather than being quietly dropped to make the number look better."
  },
  {
-  "id": "13-after",
-  "file": "13-after.wav",
-  "seconds": 13.44,
-  "text": "Six of the seven are now satisfied. The seventh, object storage, has no matching Zerops service type \u2014 so it stays a ghost and says so, rather than being quietly dropped to make the number look better."
+  "id": "13-envs",
+  "file": "13-envs.wav",
+  "seconds": 20.71,
+  "text": "Now the view Zerops does not have. Zerops shows one project at a time, and one project at a time is exactly how development, staging and production drift apart. Hold two against each other and Notch compares presence, version, failover mode, public routing, and which variable names are defined."
  },
  {
-  "id": "14-arch",
-  "file": "14-arch.wav",
-  "seconds": 18.69,
-  "text": "And here is the architecture, re-read from the platform rather than assumed. The runtime on top, the data stores beneath it, the message queue below that, with the real ports Zerops assigned. These cards are not a diagram of what we asked for. They are a picture of what exists."
+  "id": "14-envs2",
+  "file": "14-envs2.wav",
+  "seconds": 19.56,
+  "text": "Services are matched by type rather than hostname, because a database called db in staging and postgresql in production is the same service wearing two names. Container counts are deliberately not compared \u2014 those legitimately differ, and including them would bury the lines that matter."
  },
  {
-  "id": "15-timeline",
-  "file": "15-timeline.wav",
-  "seconds": 19.41,
-  "text": "The timeline is the half a live view cannot give you. It survives a reload and a daemon restart, because it is in Postgres. You can see the scan that found seven gaps, the single writer lock being taken so two people cannot provision the same project at once, and the import that succeeded."
+  "id": "15-ci",
+  "file": "15-ci.wav",
+  "seconds": 16.83,
+  "text": "But the real answer is that none of this should need a human to remember to look. The same engine runs headless. Notch check reads the repository, reads the target project, and exits non-zero when the code needs infrastructure the project has not got."
  },
  {
-  "id": "16-export",
-  "file": "16-export.wav",
-  "seconds": 15.02,
-  "text": "Finally, Notch writes the work back to disk as a zerops dot yaml you can commit. Every service carries the reason it is there as a comment, so a reviewer sees the evidence in the pull request without needing Notch open at all."
+  "id": "16-ci2",
+  "file": "16-ci2.wav",
+  "seconds": 22.68,
+  "text": "Six services and nine variables missing, each citing the dependency that proves it, as annotations on the pull request. And a check that cannot look never exits zero \u2014 if the token is wrong or the API is down it returns two and says so, because reporting all clear because you could not see would be worse than having no gate at all."
  },
  {
-  "id": "17-close",
-  "file": "17-close.wav",
-  "seconds": 15.79,
-  "text": "That's Notch. Paste a token, point at a repository, and see the difference between what your code needs and what your infrastructure has \u2014 with the evidence for every claim, a history that remembers, and a file you can commit. Thanks for watching."
+  "id": "17-timeline",
+  "file": "17-timeline.wav",
+  "seconds": 18.5,
+  "text": "Everything is written to Postgres as it happens, so the timeline survives a reload and a daemon restart. That a service is missing right now is something anyone can compute. That it has been missing across three scans since Tuesday requires having written the earlier answers down."
+ },
+ {
+  "id": "18-close",
+  "file": "18-close.wav",
+  "seconds": 18.94,
+  "text": "That's Notch. Your repository and your infrastructure, held against each other \u2014 with the evidence for every claim, a history that remembers, agents that draft but never act, and a gate that fails the build before the merge. Zerops deploys what you tell it. Notch tells you what you forgot."
  }
 ]

@@ -36,13 +36,28 @@ const work = join(TAKE, 'segments');
 rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 
+/*
+ * A mark may name its own source file.
+ *
+ * Two of the beats are `notch check` failing a build, which cannot be filmed inside the app
+ * window because the entire point is that the gate runs without the app. They are a second
+ * take against a real terminal, spliced in at the position their narration belongs. A beat's
+ * span ends at the next mark FROM THE SAME SOURCE — otherwise the last app beat before the
+ * splice would be measured against a timestamp in a different recording.
+ */
+const durOf = new Map([[raw, rawDur]]);
+const sourceOf = (m) => m.source ?? raw;
+for (const m of marks) if (!durOf.has(sourceOf(m))) durOf.set(sourceOf(m), probe(sourceOf(m)));
+
 const plan = marks.map((m, i) => {
+  const src = sourceOf(m);
   const start = m.atMs / 1000;
-  const end = i + 1 < marks.length ? marks[i + 1].atMs / 1000 : rawDur;
+  const nextSame = marks.slice(i + 1).find((n) => sourceOf(n) === src);
+  const end = nextSame === undefined ? durOf.get(src) : nextSame.atMs / 1000;
   const span = Math.max(0.1, end - start);
   const audio = m.silent ? 0 : (dur[m.id] ?? 0);
   const target = m.silent ? Math.min(span, SILENT_CAP) : audio + BREATH;
-  return { ...m, start, end, span, audio, target };
+  return { ...m, src, start, end, span, audio, target };
 });
 
 console.log('id                span    audio   target  action');
@@ -72,7 +87,7 @@ for (const [i, p] of plan.entries()) {
     `${p.id.padEnd(16)} ${p.span.toFixed(2).padStart(6)} ${p.audio.toFixed(2).padStart(7)} ` +
     `${p.target.toFixed(2).padStart(7)}  ${action}`);
 
-  const base = ['-ss', p.start.toFixed(3), '-t', p.span.toFixed(3), '-i', raw];
+  const base = ['-ss', p.start.toFixed(3), '-t', p.span.toFixed(3), '-i', p.src];
   if (p.audio > 0) {
     ff([
       ...base, '-i', join(HERE, 'audio', `${p.id}.wav`),
