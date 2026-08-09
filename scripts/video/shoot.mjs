@@ -308,11 +308,25 @@ if (frontmost() !== 'Electron') {
                   'Close whatever is holding focus and run again.');
 }
 const caffeine = spawn('caffeinate', ['-disu'], { stdio: 'ignore', detached: true });
+/*
+ * Once a second, not once every four.
+ *
+ * At four seconds a window that arrives just after the capture starts owns the frame for the
+ * whole opening beat — which is exactly what happened: the first four and a half seconds of a
+ * delivered cut had somebody else's browser in it. Every theft is timestamped so the edit and
+ * the verifier can both be told where to look.
+ */
 let stolenBy = null;
+const thefts = [];
+const captureT0 = Date.now();
 const holdFocus = setInterval(() => {
   const f = frontmost();
-  if (f !== 'Electron') { stolenBy = f; raise(); }
-}, 4000);
+  if (f !== 'Electron') {
+    stolenBy = f;
+    thefts.push({ atMs: Date.now() - captureT0, by: f });
+    raise();
+  }
+}, 1000);
 
 console.log(`recording ${CROP.w}x${CROP.h} at (${CROP.x},${CROP.y})…`);
 const ff = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'inherit'] });
@@ -334,7 +348,7 @@ await new Promise((ok) => ff.on('exit', ok));
 try { awake.kill(); } catch { /* already gone */ }
 
 writeFileSync(join(OUT, 'marks.json'), JSON.stringify({
-  crop: CROP, wallMs: wall, failure, marks: done?.marks ?? marks,
+  crop: CROP, wallMs: wall, failure, thefts, marks: done?.marks ?? marks,
 }, null, 1));
 
 /*
@@ -373,9 +387,11 @@ const diffs = prints.slice(1).map((p, i) =>
 const frozen = diffs.filter((d) => d < 2).length;
 clearInterval(holdFocus);
 try { process.kill(-caffeine.pid); } catch { /* already gone */ }
-if (stolenBy !== null) {
-  console.error(`\nFOCUS WAS STOLEN during the take (by "${stolenBy}"). It was pushed back, but ` +
-                'some frames will show the wrong window. Re-record.');
+if (thefts.length > 0) {
+  console.error(`\nFOCUS WAS STOLEN ${thefts.length} time(s) during the take:`);
+  for (const x of thefts) console.error(`  +${(x.atMs / 1000).toFixed(1)}s by "${x.by}"`);
+  console.error('  Pushed back each time, but those seconds show the wrong window. ' +
+                'verify.mjs will flag any that survived into the cut.');
 }
 
 console.log(

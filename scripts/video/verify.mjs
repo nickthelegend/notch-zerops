@@ -49,6 +49,39 @@ const stdev = (a) => { const m = mean(a); return Math.sqrt(mean(a.map((v) => (v 
  */
 const isBlank = (g) => Math.max(...g) < 40 && stdev(g) < 3;
 
+/*
+ * Is something that is not Notch in the shot?
+ *
+ * This is the check that was missing, and it cost a delivered video: a browser window sat over
+ * the left of the frame for the first four seconds of the app section and every existing test
+ * passed it. The frame was painted, it was moving, it was the right length.
+ *
+ * Notch is a dark application. Across a clean take the whole-frame mean sits between 4 and 26
+ * and the brightest pixel reaches about 175 — white text on #111111. A light-mode window in
+ * shot blows straight past both: the contaminated frames measured a mean of 58 and a peak of
+ * 255, with the left quarter of the screen averaging 202 against a normal 8.
+ *
+ * So: a saturated pixel, or a bright overall frame, or a bright edge strip, means something
+ * else is on screen. Checked on all four edges because a stray window can arrive from any of
+ * them.
+ */
+const strip = (g, side) => {
+  const out = [];
+  for (let r = 0; r < 16; r += 1) for (let c = 0; c < 16; c += 1) {
+    const keep = side === 'l' ? c < 4 : side === 'r' ? c >= 12 : side === 't' ? r < 4 : r >= 12;
+    if (keep) out.push(g[r * 16 + c]);
+  }
+  return out;
+};
+const foreign = (g) => {
+  if (Math.max(...g) >= 250) return 'saturated pixel';
+  if (mean(g) > 40) return 'frame too bright for this UI';
+  for (const side of ['l', 'r', 't', 'b']) {
+    if (mean(strip(g, side)) > 70) return `bright ${side} edge`;
+  }
+  return null;
+};
+
 const times = [];
 for (let t = 1; t < dur - 0.5; t += EVERY) times.push(Number(t.toFixed(2)));
 
@@ -56,7 +89,8 @@ console.log(`watching ${VIDEO}  ·  ${dur.toFixed(1)}s  ·  ${times.length} samp
 console.log('   t      bright   peak   Δprev   verdict');
 
 let prev = null;
-let frozen = 0, dark = 0;
+let frozen = 0, dark = 0, intruders = 0;
+const intruderAt = [];
 const frozenAt = [], darkAt = [];
 
 for (const t of times) {
@@ -64,10 +98,12 @@ for (const t of times) {
   const b = mean(g);
   const d = prev === null ? null : mad(g, prev);
   const isDark = isBlank(g);
+  const alien = foreign(g);
+  if (alien !== null) { intruders += 1; intruderAt.push(`${t}s (${alien})`); }
   const isFrozen = d !== null && d < 0.25;
   if (isDark) { dark += 1; darkAt.push(t); }
   if (isFrozen) { frozen += 1; frozenAt.push(t); }
-  const verdict = isDark ? 'BLANK' : isFrozen ? 'still' : 'moving';
+  const verdict = alien !== null ? 'FOREIGN' : isDark ? 'BLANK' : isFrozen ? 'still' : 'moving';
   console.log(`${String(t).padStart(6)}   ${b.toFixed(1).padStart(6)}  ${String(Math.max(...g)).padStart(5)}  ${(d === null ? '—' : d.toFixed(2)).padStart(6)}   ${verdict}`);
   prev = g;
 }
@@ -76,10 +112,11 @@ for (const t of times) {
 let run = 0, longest = 0;
 for (const t of times) { if (frozenAt.includes(t)) { run += 1; longest = Math.max(longest, run); } else run = 0; }
 
-console.log(`\nmoving ${times.length - frozen}/${times.length}  ·  black ${dark}  ·  longest still run ${longest} samples (${longest * EVERY}s)`);
+console.log(`\nmoving ${times.length - frozen}/${times.length}  ·  blank ${dark}  ·  foreign ${intruders}  ·  longest still run ${longest} samples (${longest * EVERY}s)`);
 
 const problems = [];
 if (dark > 0) problems.push(`${dark} blank (never-painted) frame(s) at ${darkAt.join(', ')}s`);
+if (intruders > 0) problems.push(`another window is in shot at ${intruderAt.join(', ')}`);
 if (longest * EVERY > 30) problems.push(`the picture is identical for ${longest * EVERY}s around ${frozenAt.join(', ')}s`);
 if (times.length - frozen < times.length * 0.3) problems.push('fewer than a third of samples show any change');
 
