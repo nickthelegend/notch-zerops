@@ -70,17 +70,90 @@ const MIME: Record<string, string> = {
  * A PAT written to disk is a PAT that outlives the session that needed it. The cost is
  * re-pasting after a restart; the benefit is that closing the app disposes of the credential.
  */
-let client: ZeropsClient | null = null;
+interface Session {
+  client: ZeropsClient;
+  /** Needed only by zcli, which is a separate process and takes it through `env`. */
+  token: string;
+  lastSeen: number;
+}
 
-/*
- * The raw token, held alongside the client and under the same rules.
+/**
+ * ONE SESSION PER VISITOR, not one per process.
  *
- * `ZeropsClient` deliberately never exposes the token it was built with, which is right for
- * every other caller. Deployment is the exception: zcli is a separate process and needs the
- * credential in its environment. Kept in memory only, cleared with the session, and passed to
- * the child through `env` rather than argv.
+ * This started as a single module-level client, which is correct for a desktop app talking to
+ * a daemon on loopback: there is exactly one human. The moment this same server is reachable
+ * over the internet that design hands visitor A's Zerops credential to visitor B — an
+ * account-level token that can create and delete infrastructure. So the token is keyed by an
+ * opaque session id carried in an HttpOnly cookie, and `requireClient` can only ever reach
+ * the session that presented it.
+ *
+ * Still memory-only and still discarded on restart. The cookie is not the credential; it is a
+ * lookup key for a credential that never leaves this process.
  */
-let sessionToken: string | null = null;
+/*
+ * Is this instance reachable from outside this machine?
+ *
+ * Set when the server is deployed. It tightens the cookie to Secure and — more importantly —
+ * gates the endpoints that read and write the FILESYSTEM of the host. Scanning a repository
+ * is exactly right on a desktop app pointed at your own checkout, and is a directory-traversal
+ * oracle when the same code answers the public internet.
+ */
+const PUBLIC = process.env['NOTCH_PUBLIC'] === '1';
+
+const sessions = new Map<string, Session>();
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const MAX_SESSIONS = 200;
+
+const COOKIE = 'notch_sid';
+
+function readSid(req: IncomingMessage): string | null {
+  const raw = req.headers.cookie;
+  if (raw === undefined) return null;
+  for (const part of raw.split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === COOKIE) return rest.join('=') || null;
+  }
+  return null;
+}
+
+/** Drop anything idle past the TTL, and never let the table grow without bound. */
+function sweepSessions(): void {
+  const now = Date.now();
+  for (const [id, s] of sessions) if (now - s.lastSeen > SESSION_TTL_MS) sessions.delete(id);
+  while (sessions.size > MAX_SESSIONS) {
+    const oldest = [...sessions.entries()].sort((a, b) => a[1].lastSeen - b[1].lastSeen)[0];
+    if (oldest === undefined) break;
+    sessions.delete(oldest[0]);
+  }
+}
+
+/**
+ * Which session does this request belong to?
+ *
+ * One resolver, used by every path that touches a session — a second answer to "who is logged
+ * in" is how a DELETE ends up clearing a different session than the one the next GET reads.
+ *
+ * The cookie-less fallback is what keeps the desktop app, curl and the test suite working:
+ * they carry no cookies, and on loopback there is exactly one human anyway. It is refused
+ * outright when this instance is public, because there the cookie is the ONLY thing separating
+ * one visitor's Zerops credential from another's.
+ */
+function resolveSid(req: IncomingMessage): string | null {
+  const fromCookie = readSid(req);
+  if (fromCookie !== null) return fromCookie;
+  return PUBLIC ? null : (sessions.has(TEST_SID) ? TEST_SID : null);
+}
+
+function currentSession(req: IncomingMessage): Session | null {
+  sweepSessions();
+  const sid = resolveSid(req);
+  if (sid === null) return null;
+  const s = sessions.get(sid);
+  if (s === undefined) return null;
+  s.lastSeen = Date.now();
+  return s;
+}
+
 
 /**
  * The provisioning lock.
@@ -182,12 +255,36 @@ function sendError(res: ServerResponse, err: unknown): void {
   sendJson(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
 }
 
-function requireClient(res: ServerResponse): ZeropsClient | null {
-  if (client === null) {
+/**
+ * Refuse anything that reads or writes this machine's filesystem when we are public.
+ *
+ * Scanning a repository is the whole point of Notch on a desktop: you point it at your own
+ * checkout and it reads your manifests. The identical code answering the open internet is a
+ * directory-traversal oracle — `?dir=/etc` — and `zcli push` on a shared host would deploy
+ * from whatever is lying around on it.
+ *
+ * So the hosted build serves the board, the drift you can compute from the API, the action
+ * log, the environment diff and the autopilot signals, and it says plainly why the repo-facing
+ * half is not available rather than half-working or silently returning nothing.
+ */
+function refuseIfPublic(res: ServerResponse, what: string): boolean {
+  if (!PUBLIC) return false;
+  sendJson(res, 403, {
+    error: 'not_on_hosted',
+    message: `${what} reads the filesystem of the machine Notch runs on, so it is disabled on ` +
+             'the hosted demo. Run the desktop app against your own checkout for this — ' +
+             'everything that talks to the Zerops API works here.',
+  });
+  return true;
+}
+
+function requireClient(req: IncomingMessage, res: ServerResponse): ZeropsClient | null {
+  const s = currentSession(req);
+  if (s === null) {
     sendJson(res, 401, { error: 'no_session', message: 'Paste a Zerops Personal Access Token first.' });
     return null;
   }
-  return client;
+  return s.client;
 }
 
 /** A malformed request body is the CLIENT's mistake, so it must not surface as a 500. */
@@ -405,8 +502,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       /** Paste a token. Verified by a real API call, not by checking it is non-empty. */
       case '/api/session': {
         if (req.method === 'DELETE') {
-          installClient(null);
+          const sid = resolveSid(req);
+          if (sid !== null) sessions.delete(sid);
           await record({ kind: 'session_closed', payload: {} });
+          res.setHeader('set-cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
           return sendJson(res, 200, { ok: true, message: 'token discarded' });
         }
         if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed', message: 'Use POST to open a session, or DELETE to close one.' });
@@ -417,17 +516,33 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const candidate = new ZeropsClient(token);
         const v = await candidate.verify();
         if (!v.ok) {
-          installClient(null);
+          const stale = resolveSid(req);
+          if (stale !== null) sessions.delete(stale);
           return sendJson(res, v.isAuthFailure ? 401 : 502, { error: 'token_rejected', message: v.reason });
         }
-        installClient(candidate);
+        /*
+         * A fresh id per accepted token, from the CSPRNG. Not derived from the token, not
+         * sequential, and not reused across logins — so the cookie reveals nothing about the
+         * credential and a captured one dies with the session.
+         */
+        sweepSessions();
+        const sid = randomUUID();
+        const entry: Session = { client: candidate, token, lastSeen: Date.now() };
+        sessions.set(sid, entry);
+        // A caller that sends no cookie back (the desktop shell, curl, the tests) still needs
+        // to find its session on the next request. Never in public mode — see resolveSid.
+        if (!PUBLIC && readSid(req) === null) sessions.set(TEST_SID, entry);
+        res.setHeader('set-cookie',
+          `${COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}` +
+          (PUBLIC ? '; Secure' : ''));
         await record({ kind: 'session_opened', payload: { email: v.email, projects: v.projectCount } });
         return sendJson(res, 200, v);
       }
 
       case '/api/session/status': {
-        if (client === null) return sendJson(res, 200, { connected: false });
-        const v = await client.verify();
+        const mine = currentSession(req);
+        if (mine === null) return sendJson(res, 200, { connected: false });
+        const v = await mine.client.verify();
         /*
          * `{ connected: true, ok: false }` was the old answer here, which is a contradiction:
          * it reported a live session while also reporting that the token behind it does not
@@ -442,7 +557,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
          */
         if (!v.ok) {
           if (v.isAuthFailure) {
-            installClient(null);
+            const sid = resolveSid(req);
+            if (sid !== null) sessions.delete(sid);
             await record({ kind: 'session_closed', payload: { reason: 'token rejected by Zerops' } });
             return sendJson(res, 200, { connected: false, reason: v.reason });
           }
@@ -452,7 +568,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       }
 
       case '/api/projects': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         return sendJson(res, 200, { projects: await c.projects() });
       }
@@ -472,7 +588,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         if (req.method !== 'POST') {
           return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST -- this creates a real project on your Zerops account.' });
         }
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { name?: unknown; tags?: unknown };
         const name = typeof body.name === 'string' ? body.name.trim() : '';
@@ -519,7 +635,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
       /** The architecture, laid out and ready for React Flow. */
       case '/api/graph': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const projectId = url.searchParams.get('projectId');
         if (projectId === null) {
@@ -549,6 +665,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * it refuses to run.
        */
       case '/api/hygiene': {
+        if (refuseIfPublic(res, 'The secret sweep')) return;
         const dir = url.searchParams.get('dir');
         if (dir === null || dir === '') {
           return sendJson(res, 400, { error: 'missing_params', message: 'dir is required' });
@@ -584,7 +701,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         * downloading it — the usual next action is to select it and paste.
         */
       case '/api/mermaid': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const projectId = url.searchParams.get('projectId');
         const dir = url.searchParams.get('dir') ?? '';
@@ -653,7 +770,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * Plain English in, a service set with an argument out.
        */
       case '/api/architect': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = ((await readBody(req)) ?? {}) as Record<string, unknown>;
         const agent = String(body['agent'] ?? '');
@@ -691,7 +808,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * spend money on somebody's account, and `"false"` is truthy.
        */
       case '/api/swarm/cycle': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = ((await readBody(req)) ?? {}) as Record<string, unknown>;
         const projectId = String(body['projectId'] ?? '');
@@ -763,7 +880,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       }
 
       case '/api/drift': {
-        const c = requireClient(res);
+        if (refuseIfPublic(res, 'Scanning a repository')) return;
+        const c = requireClient(req, res);
         if (c === null) return;
         const projectId = url.searchParams.get('projectId');
         const dir = url.searchParams.get('dir');
@@ -840,7 +958,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * infrastructure should never be the first time you learn what it creates.
        */
       case '/api/provision/plan': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { projectId?: unknown; types?: unknown; ha?: unknown };
         const plan = await buildPlan(c, body);
@@ -856,7 +974,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             message: 'Provisioning must be a POST -- it creates real services on your Zerops account.',
           });
         }
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { projectId?: unknown; types?: unknown; ha?: unknown };
         const plan = await buildPlan(c, body);
@@ -931,7 +1049,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * comparison is pure and tested; this endpoint only fetches the two sides.
        */
       case '/api/compare': {
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const aId = url.searchParams.get('a');
         const bId = url.searchParams.get('b');
@@ -983,10 +1101,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * where; `zerops.yml` decides how.
        */
       case '/api/deploy': {
+        if (refuseIfPublic(res, 'Deploying with zcli')) return;
         if (req.method !== 'POST') {
           return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST -- this deploys real code.' });
         }
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { projectId?: unknown; serviceId?: unknown; dir?: unknown; setup?: unknown };
         const projectId = typeof body.projectId === 'string' ? body.projectId : '';
@@ -1018,7 +1137,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         }
         const target = services.find((s) => s.id === serviceId);
 
-        const tokenForCli = process.env['ZEROPS_TOKEN'] ?? sessionToken;
+        const tokenForCli = process.env['ZEROPS_TOKEN'] ?? currentSession(req)?.token ?? null;
         if (tokenForCli === null || tokenForCli === '') {
           return sendJson(res, 400, {
             error: 'no_token',
@@ -1142,7 +1261,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         if (req.method !== 'POST') {
           return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST a question.' });
         }
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { agent?: unknown; prompt?: unknown; projectId?: unknown; dir?: unknown };
         const agent = typeof body.agent === 'string' ? body.agent : '';
@@ -1208,7 +1327,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         if (req.method !== 'POST') {
           return sendJson(res, 405, { error: 'method_not_allowed', message: 'POST to ask for a proposal.' });
         }
-        const c = requireClient(res);
+        const c = requireClient(req, res);
         if (c === null) return;
         const body = (await readBody(req)) as { agent?: unknown; projectId?: unknown; dir?: unknown; ha?: unknown };
         const agent = typeof body.agent === 'string' ? body.agent : '';
@@ -1288,7 +1407,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
        * request, and usable with `zcli` or the GUI without Brain running at all.
        */
       case '/api/export': {
-        const c = requireClient(res);
+        if (refuseIfPublic(res, 'Exporting a yaml built from a local repo')) return;
+        const c = requireClient(req, res);
         if (c === null) return;
         const dir = url.searchParams.get('dir');
         const projectId = url.searchParams.get('projectId');
@@ -1377,8 +1497,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
  * this become non-null". It is exported because `ZeropsClient` takes its own `fetch`, which
  * makes a session against a scripted Zerops constructible without a network or a real token.
  */
+/**
+ * Tests reach in here rather than going through the token gate.
+ *
+ * Kept because the suites use it, but it now writes into the same session table everything
+ * else reads from — a second code path for "who is logged in" is how the two drift apart.
+ * The fixed id means a test client is found by a request carrying no cookie at all.
+ */
+export const TEST_SID = 'test-session';
 export function installClient(c: ZeropsClient | null): void {
-  client = c;
+  if (c === null) sessions.delete(TEST_SID);
+  else sessions.set(TEST_SID, { client: c, token: 'test', lastSeen: Date.now() });
 }
 
 /** Port 0 asks the OS for a free one; the caller reads it back off the returned server. */
@@ -1414,8 +1543,22 @@ if (isEntryPoint()) {
   // needs it and the app does not persist one.
   const envToken = process.env['ZEROPS_TOKEN'];
   if (envToken !== undefined && envToken.trim() !== '') {
-    installClient(new ZeropsClient(envToken.trim()));
-    console.log(`[brain] using ZEROPS_TOKEN from the environment (${redactToken(envToken.trim())})`);
+    if (PUBLIC) {
+      /*
+       * Refused, loudly, rather than ignored.
+       *
+       * `installClient` seeds the shared cookie-less session — exactly right on a desktop, and
+       * on a public instance it would hand the operator's own account-level Zerops token to
+       * every visitor who loaded the page. Whoever set this on a hosted deployment meant
+       * something else, so say so instead of quietly doing the dangerous thing.
+       */
+      console.error('[brain] REFUSING ZEROPS_TOKEN: this instance is public (NOTCH_PUBLIC=1), ' +
+                    'and an environment token would be shared with every visitor. ' +
+                    'Visitors paste their own token; unset ZEROPS_TOKEN.');
+    } else {
+      installClient(new ZeropsClient(envToken.trim()));
+      console.log(`[brain] using ZEROPS_TOKEN from the environment (${redactToken(envToken.trim())})`);
+    }
   }
   // Schema first: the event log is part of the product, not an optional extra, and a
   // half-migrated database would fail on the first scan rather than at boot.

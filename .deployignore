@@ -1,0 +1,4 @@
+scripts/video/out
+scripts/video/audio
+scripts/video/bookends
+node_modules/.cache

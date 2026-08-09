@@ -2,7 +2,7 @@
   "name": "notch-zerops-brain",
   "version": "0.1.0",
   "private": true,
-  "description": "Brain — see your Zerops architecture, find what your repo needs and your project is missing, and provision it",
+  "description": "Brain \u2014 see your Zerops architecture, find what your repo needs and your project is missing, and provision it",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.test.json",
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
     "dev": "tsx src/server.ts",

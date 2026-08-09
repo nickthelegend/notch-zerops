@@ -1,0 +1,40 @@
+# How Notch itself is built and run on Zerops.
+#
+# NOT the same file as the `zerops.yaml` Notch exports for YOUR project — that one is an import
+# file describing infrastructure. This is the build file for this repository: how the daemon and
+# its web bundle turn into a running container.
+#
+# The hosted build is deliberately a SUBSET. `NOTCH_PUBLIC=1` turns off everything that reads
+# the filesystem of the host — scanning a repo, sweeping for committed secrets, `zcli push` —
+# because those are correct on your own desktop and a directory-traversal oracle on a public
+# URL. Everything that talks to the Zerops API works here: the board, drift computed from the
+# account, environment diff, the action log, and the autopilot signals.
+zerops:
+  - setup: app
+    build:
+      base: nodejs@24
+      buildCommands:
+        - npm ci
+        # The web bundle is built here rather than committed, so the served UI can never drift
+        # from the source it was built from.
+        - npm --prefix app ci
+        - npm --prefix app run export
+        - npx tsc
+      deployFiles:
+        - dist
+        - web
+        - node_modules
+        - package.json
+    run:
+      base: nodejs@24
+      ports:
+        - port: 7799
+          httpSupport: true
+      envVariables:
+        # Where the append-only event log lives. `${postgresql_connectionString}` is resolved by
+        # the platform against the service in this same project.
+        DATABASE_URL: ${postgresql_connectionString}
+        NOTCH_PUBLIC: "1"
+        PORT: "7799"
+        HOST: 0.0.0.0
+      start: node dist/server.js

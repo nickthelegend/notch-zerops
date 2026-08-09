@@ -10,9 +10,19 @@
  */
 const DEV_DAEMON = 'http://127.0.0.1:7799';
 
-/** Same-origin when the daemon serves the exported bundle; explicit while developing. */
+/**
+ * Same-origin whenever the daemon is serving this bundle — which is nearly always.
+ *
+ * This used to test `location.port === '7799'`, which is true on the desktop build and false
+ * on a hosted one, where the port is 443. The hosted UI would then have aimed every request at
+ * `127.0.0.1:7799` on the VISITOR's machine and failed with nothing on screen to explain it.
+ *
+ * Inverted: it is the Expo dev server (8081) that is the exception, and everything else is
+ * same-origin. A wrong guess now fails towards the common case instead of the rare one.
+ */
+const EXPO_DEV_PORT = '8081';
 export const BASE: string =
-  typeof location !== 'undefined' && location.port === '7799' ? '' : DEV_DAEMON;
+  typeof location !== 'undefined' && location.port === EXPO_DEV_PORT ? DEV_DAEMON : '';
 
 export interface ArchNode {
   id: string;
