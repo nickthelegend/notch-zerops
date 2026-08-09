@@ -67,7 +67,11 @@ https://github.com/nickthelegend/notch-zerops
 
 ## Live deployment on Zerops
 
-<!-- filled in once the deploy is verified answering 200 -->
+**https://app-2de9-7799.prg1.zerops.app**
+
+Verified: HTTP 200, serves `<title>Notch</title>` and the exact bundle that was built, a real
+PAT opens a session against the live API, and a second visitor with no cookie gets
+`no_session` rather than inheriting it.
 
 **Architecture (project `notch`):** `app` (Node.js 24 runtime — the daemon, which also serves
 the React web UI) → `postgresql@18` (the append-only event log) → `core`. Frontend, backend

@@ -1,25 +1,26 @@
 # How Notch itself is built and run on Zerops.
 #
 # NOT the same file as the `zerops.yaml` Notch exports for YOUR project — that one is an import
-# file describing infrastructure. This is the build file for this repository: how the daemon and
-# its web bundle turn into a running container.
+# file describing infrastructure. This is the build file for this repository.
 #
-# The hosted build is deliberately a SUBSET. `NOTCH_PUBLIC=1` turns off everything that reads
-# the filesystem of the host — scanning a repo, sweeping for committed secrets, `zcli push` —
-# because those are correct on your own desktop and a directory-traversal oracle on a public
-# URL. Everything that talks to the Zerops API works here: the board, drift computed from the
-# account, environment diff, the action log, and the autopilot signals.
+# THE WEB BUNDLE IS SHIPPED, NOT BUILT HERE. Building it on Zerops meant `npm ci` inside `app/`,
+# and Expo's dependency tree resolved differently there than it does locally — the build died on
+# a lockfile npm considered out of sync while the same lockfile installs cleanly on the machine
+# that wrote it. Chasing that difference buys nothing: the bundle is a static artefact, it is
+# built and verified before the push, and shipping it means the served UI is byte-for-byte the
+# one that was tested rather than whatever a second toolchain produced.
+#
+# The hosted build is deliberately a SUBSET. `NOTCH_PUBLIC=1` disables everything that reads the
+# filesystem of the host — scanning a repo, sweeping for committed secrets, `zcli push` — which
+# is correct on your own desktop and a directory-traversal oracle on a public URL. Everything
+# that talks to the Zerops API works here.
 zerops:
   - setup: app
     build:
       base: nodejs@24
       buildCommands:
         - npm ci
-        # The web bundle is built here rather than committed, so the served UI can never drift
-        # from the source it was built from.
-        - npm --prefix app ci
-        - npm --prefix app run export
-        - npx tsc
+        - npm run build
       deployFiles:
         - dist
         - web
@@ -31,8 +32,7 @@ zerops:
         - port: 7799
           httpSupport: true
       envVariables:
-        # Where the append-only event log lives. `${postgresql_connectionString}` is resolved by
-        # the platform against the service in this same project.
+        # The append-only event log. Resolved by the platform against the service in this project.
         DATABASE_URL: ${postgresql_connectionString}
         NOTCH_PUBLIC: "1"
         PORT: "7799"
