@@ -12,7 +12,7 @@
  *
  * Prints a table and exits non-zero if the cut fails any of them.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -82,6 +82,26 @@ const foreign = (g) => {
   return null;
 };
 
+/*
+ * Black frames, every frame — not every fifth second.
+ *
+ * The sampler nearly missed a 0.2-second black gap at an intro scene cut, and only caught it
+ * by luck once the timeline was rescaled and a sample happened to land inside it. Six frames
+ * of blink reads as a dropped frame, and a check that finds it only by coincidence is not a
+ * check. ffmpeg's own blackdetect walks the whole stream and costs one pass.
+ */
+const blackRuns = (() => {
+  // blackdetect reports on STDERR, like every ffmpeg filter that logs.
+  const r = spawnSync('ffmpeg',
+    ['-hide_banner', '-i', VIDEO, '-vf', 'blackdetect=d=0.05:pix_th=0.02', '-f', 'null', '-'],
+    { encoding: 'utf8' });
+  const out = (r.stderr ?? '') + (r.stdout ?? '');
+  return [...out.matchAll(/black_start:([\d.]+) black_end:([\d.]+) black_duration:([\d.]+)/g)]
+    .map((m) => ({ start: Number(m[1]), end: Number(m[2]), dur: Number(m[3]) }))
+    // A fade to black at the very end of a file is an ending, not a defect.
+    .filter((r) => r.start < dur - 0.6);
+})();
+
 const times = [];
 for (let t = 1; t < dur - 0.5; t += EVERY) times.push(Number(t.toFixed(2)));
 
@@ -115,6 +135,14 @@ for (const t of times) { if (frozenAt.includes(t)) { run += 1; longest = Math.ma
 console.log(`\nmoving ${times.length - frozen}/${times.length}  ·  blank ${dark}  ·  foreign ${intruders}  ·  longest still run ${longest} samples (${longest * EVERY}s)`);
 
 const problems = [];
+if (blackRuns.length > 0) {
+  console.log('\nblack runs (every frame scanned):');
+  for (const r of blackRuns) console.log(`  ${r.start.toFixed(2)}s → ${r.end.toFixed(2)}s  (${r.dur.toFixed(2)}s)`);
+  problems.push(`${blackRuns.length} black gap(s): ` +
+    blackRuns.map((r) => `${r.dur.toFixed(2)}s at ${r.start.toFixed(2)}s`).join(', '));
+} else {
+  console.log('\nblack runs: none (every frame scanned)');
+}
 if (dark > 0) problems.push(`${dark} blank (never-painted) frame(s) at ${darkAt.join(', ')}s`);
 if (intruders > 0) problems.push(`another window is in shot at ${intruderAt.join(', ')}`);
 if (longest * EVERY > 30) problems.push(`the picture is identical for ${longest * EVERY}s around ${frozenAt.join(', ')}s`);
