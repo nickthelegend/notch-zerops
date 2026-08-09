@@ -11,8 +11,11 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import assert from 'node:assert/strict';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** Resolved from this file, not from cwd — it is run from the repo root as often as not. */
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const W = join('/tmp', `guardtest-${process.pid}`);
 rmSync(W, { recursive: true, force: true });
@@ -51,7 +54,7 @@ const asVideo = (png) => {
 
 const run = (mp4) => {
   try {
-    execFileSync('node', ['verify.mjs', mp4, '1'], { encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('node', [join(HERE, 'verify.mjs'), mp4, '1'], { encoding: 'utf8', stdio: 'pipe' });
     return { ok: true, out: '' };
   } catch (e) {
     return { ok: false, out: (e.stdout ?? '') + (e.stderr ?? '') };
